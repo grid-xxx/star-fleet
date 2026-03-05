@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Determine version
+        id: version
+        run: |
+          # Count commits on main as patch number, date as minor
+          COMMIT_COUNT=$(git rev-list --count HEAD)
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          VERSION="0.1.${COMMIT_COUNT}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag exists
+        id: check_tag
+        run: |
+          if git rev-parse "refs/tags/${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build binaries
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          LDFLAGS="-s -w -X github.com/nullne/star-fleet/internal/cli.version=${VERSION}"
+
+          declare -a TARGETS=(
+            "linux/amd64"
+            "linux/arm64"
+            "darwin/amd64"
+            "darwin/arm64"
+          )
+
+          mkdir -p dist
+
+          for target in "${TARGETS[@]}"; do
+            OS="${target%/*}"
+            ARCH="${target#*/}"
+            BINARY="fleet"
+
+            echo "Building ${OS}/${ARCH}..."
+            GOOS="$OS" GOARCH="$ARCH" go build \
+              -ldflags "$LDFLAGS" \
+              -o "dist/${BINARY}" \
+              ./cmd/fleet
+
+            tar -czf "dist/fleet_${VERSION}_${OS}_${ARCH}.tar.gz" \
+              -C dist "${BINARY}"
+            rm "dist/${BINARY}"
+          done
+
+          # Generate checksums
+          cd dist
+          sha256sum *.tar.gz > checksums.txt
+
+      - name: Create release
+        if: steps.check_tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.version }}"
+
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$LAST_TAG" ]; then
+            NOTES=$(git log "${LAST_TAG}..HEAD" --pretty=format:"- %s" --no-merges)
+          else
+            NOTES=$(git log --pretty=format:"- %s" --no-merges -20)
+          fi
+
+          cat > /tmp/release-notes.md <<EOF
+          ## Changes
+
+          ${NOTES}
+
+          ## Install
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/nullne/star-fleet/main/install.sh | bash
+          \`\`\`
+          EOF
+
+          gh release create "$TAG" dist/*.tar.gz dist/checksums.txt \
+            --title "Star Fleet ${VERSION}" \
+            --notes-file /tmp/release-notes.md

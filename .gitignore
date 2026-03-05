@@ -1,0 +1,13 @@
+# Binary
+fleet
+
+# Worktrees created at runtime
+worktrees/
+
+# Review output (ephemeral)
+.fleet-review-output.md
+
+# Go
+*.exe
+*.test
+*.out

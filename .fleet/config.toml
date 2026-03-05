@@ -1,0 +1,9 @@
+[agent]
+backend = "claude-code"  # "claude-code" | "cursor"
+
+[test]
+command = ""  # override auto-detected test command, e.g. "go test ./..."
+
+[validate]
+max_fix_rounds = 3
+max_cycles = 2
