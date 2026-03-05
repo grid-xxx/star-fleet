@@ -1,5 +1,5 @@
-# Binary
-fleet
+# Binary (root only, not cmd/fleet/)
+/fleet
 
 # Worktrees created at runtime
 worktrees/
