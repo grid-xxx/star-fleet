@@ -12,6 +12,8 @@ type Config struct {
 	Agent    AgentConfig    `toml:"agent"`
 	Test     TestConfig     `toml:"test"`
 	Validate ValidateConfig `toml:"validate"`
+	Watch    WatchConfig    `toml:"watch"`
+	CI       CIConfig       `toml:"ci"`
 }
 
 type AgentConfig struct {
@@ -27,12 +29,34 @@ type ValidateConfig struct {
 	MaxCycles    int `toml:"max_cycles"`
 }
 
+type WatchConfig struct {
+	PollInterval string `toml:"poll_interval"`
+	Timeout      string `toml:"timeout"`
+	IdleTimeout  string `toml:"idle_timeout"`
+	MaxFixRounds int    `toml:"max_fix_rounds"`
+}
+
+type CIConfig struct {
+	Enabled        bool     `toml:"enabled"`
+	RequiredChecks []string `toml:"required_checks"`
+}
+
 func defaults() Config {
 	return Config{
 		Agent: AgentConfig{Backend: "claude-code"},
 		Validate: ValidateConfig{
 			MaxFixRounds: 3,
 			MaxCycles:    2,
+		},
+		Watch: WatchConfig{
+			PollInterval: "30s",
+			Timeout:      "2h",
+			IdleTimeout:  "30m",
+			MaxFixRounds: 5,
+		},
+		CI: CIConfig{
+			Enabled:        true,
+			RequiredChecks: []string{},
 		},
 	}
 }

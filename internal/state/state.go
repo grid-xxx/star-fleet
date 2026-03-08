@@ -22,7 +22,13 @@ const (
 	PhasePRs      Phase = "prs"       // PRs created
 	PhaseReview   Phase = "review"    // review completed
 	PhaseValidate Phase = "validate"  // cross-validation passed
-	PhaseDone     Phase = "done"      // delivery PR created, issue closed
+
+	// Single-agent workflow phases (replaces Dispatch→Push→PRs→Review→Validate)
+	PhaseImplement Phase = "implement" // single agent completed implementation + tests
+	PhasePR        Phase = "pr"        // branch pushed + PR created
+	PhaseWatch     Phase = "watch"     // watching PR for feedback
+
+	PhaseDone Phase = "done" // delivery PR created, issue closed
 )
 
 var phaseOrder = map[Phase]int{
@@ -33,7 +39,11 @@ var phaseOrder = map[Phase]int{
 	PhasePRs:      4,
 	PhaseReview:   5,
 	PhaseValidate: 6,
-	PhaseDone:     7,
+	// Single-agent workflow ordering
+	PhaseImplement: 10,
+	PhasePR:        11,
+	PhaseWatch:     12,
+	PhaseDone:      99,
 }
 
 func (p Phase) String() string {
@@ -79,6 +89,16 @@ type RunState struct {
 	ValRound   int  `json:"val_round"`
 
 	DeliverPR *PRInfo `json:"deliver_pr,omitempty"`
+
+	// Single-agent workflow fields
+	Branch string  `json:"branch,omitempty"` // single branch (e.g. "fleet/42")
+	PR     *PRInfo `json:"pr,omitempty"`     // single PR
+
+	// Watch loop state
+	ProcessedEvents []string  `json:"processed_events,omitempty"`
+	LastEventAt     time.Time `json:"last_event_at,omitempty"`
+	FixCount        int       `json:"fix_count,omitempty"`
+	WatchStartedAt  time.Time `json:"watch_started_at,omitempty"`
 
 	UpdatedAt time.Time `json:"updated_at"`
 
