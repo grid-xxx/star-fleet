@@ -61,7 +61,8 @@ func defaults() Config {
 			MaxFixRounds: 5,
 		},
 		CI: CIConfig{
-			Enabled: true,
+			Enabled:        true,
+			RequiredChecks: []string{},
 		},
 	}
 }

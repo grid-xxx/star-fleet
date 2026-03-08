@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestDefaults(t *testing.T) {
@@ -17,22 +18,16 @@ func TestDefaults(t *testing.T) {
 	if cfg.Agent.Backend != "claude-code" {
 		t.Errorf("agent.backend = %q, want \"claude-code\"", cfg.Agent.Backend)
 	}
-	if cfg.Validate.MaxFixRounds != 3 {
-		t.Errorf("validate.max_fix_rounds = %d, want 3", cfg.Validate.MaxFixRounds)
-	}
-	if cfg.Validate.MaxCycles != 2 {
-		t.Errorf("validate.max_cycles = %d, want 2", cfg.Validate.MaxCycles)
-	}
 
 	// Watch defaults
-	if cfg.Watch.PollInterval != "30s" {
-		t.Errorf("watch.poll_interval = %q, want \"30s\"", cfg.Watch.PollInterval)
+	if cfg.Watch.PollInterval.Duration != 30*time.Second {
+		t.Errorf("watch.poll_interval = %v, want 30s", cfg.Watch.PollInterval.Duration)
 	}
-	if cfg.Watch.Timeout != "2h" {
-		t.Errorf("watch.timeout = %q, want \"2h\"", cfg.Watch.Timeout)
+	if cfg.Watch.Timeout.Duration != 2*time.Hour {
+		t.Errorf("watch.timeout = %v, want 2h", cfg.Watch.Timeout.Duration)
 	}
-	if cfg.Watch.IdleTimeout != "30m" {
-		t.Errorf("watch.idle_timeout = %q, want \"30m\"", cfg.Watch.IdleTimeout)
+	if cfg.Watch.IdleTimeout.Duration != 30*time.Minute {
+		t.Errorf("watch.idle_timeout = %v, want 30m", cfg.Watch.IdleTimeout.Duration)
 	}
 	if cfg.Watch.MaxFixRounds != 5 {
 		t.Errorf("watch.max_fix_rounds = %d, want 5", cfg.Watch.MaxFixRounds)
@@ -87,14 +82,14 @@ max_fix_rounds = 10
 		t.Fatal(err)
 	}
 
-	if cfg.Watch.PollInterval != "60s" {
-		t.Errorf("poll_interval = %q, want \"60s\"", cfg.Watch.PollInterval)
+	if cfg.Watch.PollInterval.Duration != 60*time.Second {
+		t.Errorf("poll_interval = %v, want 60s", cfg.Watch.PollInterval.Duration)
 	}
-	if cfg.Watch.Timeout != "4h" {
-		t.Errorf("timeout = %q, want \"4h\"", cfg.Watch.Timeout)
+	if cfg.Watch.Timeout.Duration != 4*time.Hour {
+		t.Errorf("timeout = %v, want 4h", cfg.Watch.Timeout.Duration)
 	}
-	if cfg.Watch.IdleTimeout != "1h" {
-		t.Errorf("idle_timeout = %q, want \"1h\"", cfg.Watch.IdleTimeout)
+	if cfg.Watch.IdleTimeout.Duration != 1*time.Hour {
+		t.Errorf("idle_timeout = %v, want 1h", cfg.Watch.IdleTimeout.Duration)
 	}
 	if cfg.Watch.MaxFixRounds != 10 {
 		t.Errorf("max_fix_rounds = %d, want 10", cfg.Watch.MaxFixRounds)
@@ -161,15 +156,15 @@ timeout = "6h"
 		t.Fatal(err)
 	}
 
-	if cfg.Watch.Timeout != "6h" {
-		t.Errorf("timeout = %q, want \"6h\"", cfg.Watch.Timeout)
+	if cfg.Watch.Timeout.Duration != 6*time.Hour {
+		t.Errorf("timeout = %v, want 6h", cfg.Watch.Timeout.Duration)
 	}
 	// Defaults for unspecified fields
-	if cfg.Watch.PollInterval != "30s" {
-		t.Errorf("poll_interval = %q, want default \"30s\"", cfg.Watch.PollInterval)
+	if cfg.Watch.PollInterval.Duration != 30*time.Second {
+		t.Errorf("poll_interval = %v, want default 30s", cfg.Watch.PollInterval.Duration)
 	}
-	if cfg.Watch.IdleTimeout != "30m" {
-		t.Errorf("idle_timeout = %q, want default \"30m\"", cfg.Watch.IdleTimeout)
+	if cfg.Watch.IdleTimeout.Duration != 30*time.Minute {
+		t.Errorf("idle_timeout = %v, want default 30m", cfg.Watch.IdleTimeout.Duration)
 	}
 	if cfg.Watch.MaxFixRounds != 5 {
 		t.Errorf("max_fix_rounds = %d, want default 5", cfg.Watch.MaxFixRounds)
@@ -245,10 +240,6 @@ max_fix_rounds = 8
 [ci]
 enabled = true
 required_checks = ["ci/build"]
-
-[validate]
-max_fix_rounds = 5
-max_cycles = 3
 `
 	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(data), 0o644); err != nil {
 		t.Fatal(err)
@@ -265,8 +256,8 @@ max_cycles = 3
 	if cfg.Test.Command != "go test ./..." {
 		t.Errorf("test.command = %q", cfg.Test.Command)
 	}
-	if cfg.Watch.PollInterval != "45s" {
-		t.Errorf("watch.poll_interval = %q", cfg.Watch.PollInterval)
+	if cfg.Watch.PollInterval.Duration != 45*time.Second {
+		t.Errorf("watch.poll_interval = %v", cfg.Watch.PollInterval.Duration)
 	}
 	if cfg.Watch.MaxFixRounds != 8 {
 		t.Errorf("watch.max_fix_rounds = %d", cfg.Watch.MaxFixRounds)
@@ -276,8 +267,5 @@ max_cycles = 3
 	}
 	if len(cfg.CI.RequiredChecks) != 1 || cfg.CI.RequiredChecks[0] != "ci/build" {
 		t.Errorf("ci.required_checks = %v", cfg.CI.RequiredChecks)
-	}
-	if cfg.Validate.MaxFixRounds != 5 {
-		t.Errorf("validate.max_fix_rounds = %d", cfg.Validate.MaxFixRounds)
 	}
 }

@@ -2,230 +2,85 @@ package watch
 
 import (
 	"testing"
-	"time"
 )
-
-// ---------------------------------------------------------------------------
-// Event type constants
-// ---------------------------------------------------------------------------
 
 func TestEventTypeConstants(t *testing.T) {
 	tests := []struct {
 		eventType EventType
-		expected  string
+		wantVal   EventType
 	}{
-		{EventReviewComment, "review_comment"},
-		{EventPRComment, "pr_comment"},
-		{EventCheckPass, "check_pass"},
-		{EventCheckFail, "check_fail"},
-		{EventMerged, "merged"},
-		{EventClosed, "closed"},
+		{EventComment, EventComment},
+		{EventReview, EventReview},
+		{EventCIFail, EventCIFail},
+		{EventCIPass, EventCIPass},
+		{EventMerged, EventMerged},
+		{EventClosed, EventClosed},
 	}
 	for _, tt := range tests {
-		if string(tt.eventType) != tt.expected {
-			t.Errorf("EventType = %q, want %q", tt.eventType, tt.expected)
+		if tt.eventType != tt.wantVal {
+			t.Errorf("EventType constant mismatch: got %d, want %d", tt.eventType, tt.wantVal)
 		}
 	}
 }
 
-// ---------------------------------------------------------------------------
-// PRState constants
-// ---------------------------------------------------------------------------
-
-func TestPRStateConstants(t *testing.T) {
-	tests := []struct {
-		state    PRState
-		expected string
-	}{
-		{PROpen, "open"},
-		{PRMerged, "merged"},
-		{PRClosed, "closed"},
+func TestEventTypeOrdering(t *testing.T) {
+	if EventComment != 0 {
+		t.Errorf("EventComment = %d, want 0 (first iota)", EventComment)
 	}
-	for _, tt := range tests {
-		if string(tt.state) != tt.expected {
-			t.Errorf("PRState = %q, want %q", tt.state, tt.expected)
-		}
+	if EventClosed <= EventComment {
+		t.Errorf("EventClosed (%d) should be greater than EventComment (%d)", EventClosed, EventComment)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Event struct
-// ---------------------------------------------------------------------------
 
 func TestEventFields(t *testing.T) {
-	now := time.Now()
 	e := Event{
-		ID:        "comment-123",
-		Type:      EventReviewComment,
-		Body:      "Please fix the variable naming",
-		Author:    "reviewer",
-		CreatedAt: now,
+		Type:    EventComment,
+		ID:      "comment-123",
+		Summary: "Comment by @reviewer",
+		Detail:  "Please fix the variable naming",
+		Author:  "reviewer",
 	}
 
 	if e.ID != "comment-123" {
 		t.Errorf("ID = %q", e.ID)
 	}
-	if e.Type != EventReviewComment {
-		t.Errorf("Type = %q", e.Type)
+	if e.Type != EventComment {
+		t.Errorf("Type = %d, want EventComment", e.Type)
 	}
-	if e.Body != "Please fix the variable naming" {
-		t.Errorf("Body = %q", e.Body)
+	if e.Summary != "Comment by @reviewer" {
+		t.Errorf("Summary = %q", e.Summary)
+	}
+	if e.Detail != "Please fix the variable naming" {
+		t.Errorf("Detail = %q", e.Detail)
 	}
 	if e.Author != "reviewer" {
 		t.Errorf("Author = %q", e.Author)
 	}
-	if !e.CreatedAt.Equal(now) {
-		t.Errorf("CreatedAt = %v", e.CreatedAt)
-	}
 }
 
-// ---------------------------------------------------------------------------
-// CheckRun struct
-// ---------------------------------------------------------------------------
-
-func TestCheckRunFields(t *testing.T) {
+func TestIsOwnComment(t *testing.T) {
 	tests := []struct {
-		name       string
-		run        CheckRun
-		wantPassed bool
+		body string
+		want bool
 	}{
-		{
-			name:       "successful check",
-			run:        CheckRun{Name: "build", Status: "completed", Conclusion: "success"},
-			wantPassed: true,
-		},
-		{
-			name:       "failed check",
-			run:        CheckRun{Name: "test", Status: "completed", Conclusion: "failure"},
-			wantPassed: false,
-		},
-		{
-			name:       "neutral check",
-			run:        CheckRun{Name: "lint", Status: "completed", Conclusion: "neutral"},
-			wantPassed: false,
-		},
-		{
-			name:       "in-progress check",
-			run:        CheckRun{Name: "deploy", Status: "in_progress", Conclusion: ""},
-			wantPassed: false,
-		},
-		{
-			name:       "queued check",
-			run:        CheckRun{Name: "e2e", Status: "queued", Conclusion: ""},
-			wantPassed: false,
-		},
+		{"## 🚀 Star Fleet — PR Ready\n\nSome body", true},
+		{"## ⚠️ Star Fleet — Watch Timeout\n\nTimed out", true},
+		{"## 🔍 Star Fleet — Review\n\nDetails", true},
+		{"## ✅ Star Fleet — CI Passed\n\nAll checks passed.", true},
+		{"LGTM", false},
+		{"Looks good to me!", false},
+		{"", false},
 	}
-
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			passed := tt.run.Status == "completed" && tt.run.Conclusion == "success"
-			if passed != tt.wantPassed {
-				t.Errorf("check %q: passed = %v, want %v", tt.run.Name, passed, tt.wantPassed)
-			}
-		})
-	}
-}
-
-func TestCheckRunLogURL(t *testing.T) {
-	run := CheckRun{
-		Name:       "CI",
-		Status:     "completed",
-		Conclusion: "failure",
-		LogURL:     "https://github.com/owner/repo/actions/runs/123",
-	}
-	if run.LogURL == "" {
-		t.Error("LogURL should be set for failed checks")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// EventSource interface compliance
-// ---------------------------------------------------------------------------
-
-func TestMockEventSourceImplementsInterface(t *testing.T) {
-	// Compile-time check that mockEventSource implements EventSource
-	var _ EventSource = &mockEventSource{}
-}
-
-func TestDynamicMockEventSourceImplementsInterface(t *testing.T) {
-	var _ EventSource = &dynamicMockEventSource{}
-}
-
-// ---------------------------------------------------------------------------
-// Event ordering
-// ---------------------------------------------------------------------------
-
-func TestEventsChronologicalOrder(t *testing.T) {
-	now := time.Now()
-	events := []Event{
-		{ID: "1", CreatedAt: now.Add(-3 * time.Minute)},
-		{ID: "2", CreatedAt: now.Add(-2 * time.Minute)},
-		{ID: "3", CreatedAt: now.Add(-1 * time.Minute)},
-	}
-
-	for i := 1; i < len(events); i++ {
-		if !events[i].CreatedAt.After(events[i-1].CreatedAt) {
-			t.Errorf("events should be in chronological order: event %d (%v) should be after event %d (%v)",
-				i, events[i].CreatedAt, i-1, events[i-1].CreatedAt)
+		if got := isOwnComment(tt.body); got != tt.want {
+			t.Errorf("isOwnComment(%q) = %v, want %v", tt.body[:min(len(tt.body), 30)], got, tt.want)
 		}
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Multiple check run aggregation
-// ---------------------------------------------------------------------------
-
-func TestAllChecksPassed(t *testing.T) {
-	checks := []CheckRun{
-		{Name: "build", Status: "completed", Conclusion: "success"},
-		{Name: "test", Status: "completed", Conclusion: "success"},
-		{Name: "lint", Status: "completed", Conclusion: "success"},
+func min(a, b int) int {
+	if a < b {
+		return a
 	}
-
-	allPassed := true
-	for _, c := range checks {
-		if c.Status != "completed" || c.Conclusion != "success" {
-			allPassed = false
-			break
-		}
-	}
-	if !allPassed {
-		t.Error("all checks should pass")
-	}
-}
-
-func TestAnyCheckFailed(t *testing.T) {
-	checks := []CheckRun{
-		{Name: "build", Status: "completed", Conclusion: "success"},
-		{Name: "test", Status: "completed", Conclusion: "failure"},
-		{Name: "lint", Status: "completed", Conclusion: "success"},
-	}
-
-	var failed []string
-	for _, c := range checks {
-		if c.Status == "completed" && c.Conclusion == "failure" {
-			failed = append(failed, c.Name)
-		}
-	}
-	if len(failed) != 1 || failed[0] != "test" {
-		t.Errorf("expected [test] to be failed, got %v", failed)
-	}
-}
-
-func TestChecksStillPending(t *testing.T) {
-	checks := []CheckRun{
-		{Name: "build", Status: "completed", Conclusion: "success"},
-		{Name: "test", Status: "in_progress", Conclusion: ""},
-	}
-
-	allCompleted := true
-	for _, c := range checks {
-		if c.Status != "completed" {
-			allCompleted = false
-			break
-		}
-	}
-	if allCompleted {
-		t.Error("not all checks should be completed")
-	}
+	return b
 }

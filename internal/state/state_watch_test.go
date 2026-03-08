@@ -131,9 +131,11 @@ func TestWatchStateFields(t *testing.T) {
 	s.Branch = "fleet/42"
 	s.PR = &PRInfo{Number: 100, URL: "https://github.com/owner/repo/pull/100"}
 	s.ProcessedEvents = []string{"comment-123", "review-456"}
-	s.LastEventAt = now
+	lastEvent := now
+	s.LastEventAt = &lastEvent
 	s.FixCount = 2
-	s.WatchStartedAt = now.Add(-1 * time.Hour)
+	watchStart := now.Add(-1 * time.Hour)
+	s.WatchStartedAt = &watchStart
 
 	if err := s.Advance(PhaseWatch); err != nil {
 		t.Fatal(err)
@@ -162,10 +164,10 @@ func TestWatchStateFields(t *testing.T) {
 	if loaded.FixCount != 2 {
 		t.Errorf("FixCount = %d, want 2", loaded.FixCount)
 	}
-	if !loaded.LastEventAt.Equal(now) {
+	if loaded.LastEventAt == nil || !loaded.LastEventAt.Equal(now) {
 		t.Errorf("LastEventAt = %v, want %v", loaded.LastEventAt, now)
 	}
-	if !loaded.WatchStartedAt.Equal(now.Add(-1 * time.Hour)) {
+	if loaded.WatchStartedAt == nil || !loaded.WatchStartedAt.Equal(now.Add(-1 * time.Hour)) {
 		t.Errorf("WatchStartedAt = %v", loaded.WatchStartedAt)
 	}
 }
@@ -179,8 +181,10 @@ func TestWatchStateResumability(t *testing.T) {
 	s.PR = &PRInfo{Number: 50, URL: "https://github.com/owner/repo/pull/50"}
 	s.ProcessedEvents = []string{"comment-1", "comment-2"}
 	s.FixCount = 1
-	s.WatchStartedAt = time.Now().Add(-30 * time.Minute).Truncate(time.Second)
-	s.LastEventAt = time.Now().Add(-5 * time.Minute).Truncate(time.Second)
+	watchStart2 := time.Now().Add(-30 * time.Minute).Truncate(time.Second)
+	s.WatchStartedAt = &watchStart2
+	lastEvent2 := time.Now().Add(-5 * time.Minute).Truncate(time.Second)
+	s.LastEventAt = &lastEvent2
 	if err := s.Advance(PhaseWatch); err != nil {
 		t.Fatal(err)
 	}
@@ -238,8 +242,10 @@ func TestStateJSONFormat(t *testing.T) {
 	s.PR = &PRInfo{Number: 100, URL: "https://github.com/owner/repo/pull/100"}
 	s.ProcessedEvents = []string{"comment-123", "review-456"}
 	s.FixCount = 2
-	s.WatchStartedAt = time.Date(2026, 3, 8, 13, 0, 0, 0, time.UTC)
-	s.LastEventAt = time.Date(2026, 3, 8, 14, 0, 0, 0, time.UTC)
+	watchStart3 := time.Date(2026, 3, 8, 13, 0, 0, 0, time.UTC)
+	s.WatchStartedAt = &watchStart3
+	lastEvent3 := time.Date(2026, 3, 8, 14, 0, 0, 0, time.UTC)
+	s.LastEventAt = &lastEvent3
 
 	if err := s.Advance(PhaseWatch); err != nil {
 		t.Fatal(err)
