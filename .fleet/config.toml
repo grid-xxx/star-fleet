@@ -1,5 +1,5 @@
 [agent]
-backend = "claude-code"  # "claude-code" | "cursor"
+backend = "cursor"  # "claude-code" | "cursor"
 
 [watch]
 poll_interval = "30s"   # how often to check for new events
