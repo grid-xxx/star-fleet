@@ -14,7 +14,7 @@
 //	# Smoke test — verify tools (~5s, no tokens used)
 //	go test -v -run TestIntegrationSmoke ./test/integration/
 //
-//	# Full pipeline — auto-creates a GitHub repo, runs both agents (~5-20 min)
+//	# Full pipeline — auto-creates a GitHub repo, runs the agent (~5-20 min)
 //	go test -v -count=1 -timeout=30m -run TestIntegrationFullPipeline ./test/integration/
 //
 //	# Keep repo after test for manual inspection
@@ -100,7 +100,7 @@ func TestIntegrationSmoke(t *testing.T) {
 // TestIntegrationFullPipeline — end-to-end pipeline test.
 //
 // Creates a fresh GitHub repo (or uses FLEET_TEST_REPO), creates a test issue,
-// runs dev+test agents, review, cross-validation, and verifies delivery.
+// runs the single agent, creates PR, and verifies delivery.
 //
 // Set FLEET_TEST_KEEP=1 to preserve the repo and PRs for manual inspection.
 // ---------------------------------------------------------------------------
@@ -142,12 +142,13 @@ func TestIntegrationFullPipeline(t *testing.T) {
 
 	// --- Build config ---
 	cfg := &config.Config{
-		Agent:    config.AgentConfig{Backend: backend},
-		Test:     config.TestConfig{Command: "go test ./..."},
-		Validate: config.ValidateConfig{MaxFixRounds: 2, MaxCycles: 1},
+		Agent: config.AgentConfig{Backend: backend},
+		Watch: config.WatchConfig{MaxFixRounds: 2},
+		CI:    config.CIConfig{Enabled: true},
+		Test:  config.TestConfig{Command: "go test ./..."},
 	}
 
-	// --- Run pipeline ---
+	// --- Run pipeline (no-watch for integration tests) ---
 	t.Log("─── pipeline start ───")
 	start := time.Now()
 
@@ -158,6 +159,7 @@ func TestIntegrationFullPipeline(t *testing.T) {
 		Config:   cfg,
 		Display:  ui.New(),
 		RepoRoot: repoDir,
+		NoWatch:  true,
 	}
 	err := o.Run(ctx)
 	elapsed := time.Since(start)
@@ -169,15 +171,15 @@ func TestIntegrationFullPipeline(t *testing.T) {
 
 	// --- Verify ---
 	verifyIssue(t, ctx, nwo, issueNum)
-	deliveryPR := verifyDeliveryPR(t, ctx, nwo, issueNum)
+	prNum := verifyPR(t, ctx, nwo, issueNum)
 
 	if keep {
 		t.Log("")
 		t.Log("═══ FLEET_TEST_KEEP: artifacts preserved ═══")
-		t.Logf("  Repo:        https://github.com/%s", nwo)
-		t.Logf("  Issue:       https://github.com/%s/issues/%d", nwo, issueNum)
-		if deliveryPR > 0 {
-			t.Logf("  Delivery PR: https://github.com/%s/pull/%d", nwo, deliveryPR)
+		t.Logf("  Repo:   https://github.com/%s", nwo)
+		t.Logf("  Issue:  https://github.com/%s/issues/%d", nwo, issueNum)
+		if prNum > 0 {
+			t.Logf("  PR:     https://github.com/%s/pull/%d", nwo, prNum)
 		}
 		if repoCreated {
 			t.Logf("")
@@ -255,20 +257,19 @@ func verifyIssue(t *testing.T, ctx context.Context, nwo string, issueNum int) {
 	}
 	s := ghJSON[issueInfo](t, ctx, "issue", "view", strconv.Itoa(issueNum),
 		"--repo", nwo, "--json", "state")
-	// Issue should still be OPEN — it auto-closes when the delivery PR is merged
+	// Issue should still be OPEN — it auto-closes when the PR is merged
 	if s.State != "OPEN" {
-		t.Logf("verify: issue #%d state = %s (expected OPEN until delivery PR is merged)", issueNum, s.State)
+		t.Logf("verify: issue #%d state = %s (expected OPEN until PR is merged)", issueNum, s.State)
 	} else {
 		t.Logf("verify: issue #%d OPEN (will close on PR merge) ✓", issueNum)
 	}
 }
 
-// verifyDeliveryPR checks the delivery PR exists, has meaningful content,
-// and that dev/test PRs have been closed.
-// Returns the delivery PR number (0 if not found).
-func verifyDeliveryPR(t *testing.T, ctx context.Context, nwo string, issueNum int) int {
+// verifyPR checks the PR exists and has meaningful content.
+// Returns the PR number (0 if not found).
+func verifyPR(t *testing.T, ctx context.Context, nwo string, issueNum int) int {
 	t.Helper()
-	branch := fmt.Sprintf("fleet/deliver/%d", issueNum)
+	branch := fmt.Sprintf("fleet/%d", issueNum)
 
 	type prInfo struct {
 		Number int    `json:"number"`
@@ -279,17 +280,17 @@ func verifyDeliveryPR(t *testing.T, ctx context.Context, nwo string, issueNum in
 		"--repo", nwo, "--head", branch, "--json", "number,state,body")
 
 	if len(prs) == 0 {
-		t.Fatalf("no delivery PR found for branch %s", branch)
+		t.Fatalf("no PR found for branch %s", branch)
 	}
 	pr := prs[0]
-	t.Logf("verify: delivery PR #%d (state: %s) ✓", pr.Number, pr.State)
+	t.Logf("verify: PR #%d (state: %s) ✓", pr.Number, pr.State)
 
 	// Body should reference the issue for auto-close
 	closesRef := fmt.Sprintf("Closes #%d", issueNum)
 	if !strings.Contains(pr.Body, closesRef) {
-		t.Errorf("delivery PR body missing %q for auto-close", closesRef)
+		t.Errorf("PR body missing %q for auto-close", closesRef)
 	} else {
-		t.Logf("verify: delivery PR body contains %q ✓", closesRef)
+		t.Logf("verify: PR body contains %q ✓", closesRef)
 	}
 
 	// Diff should have substance
@@ -301,25 +302,9 @@ func verifyDeliveryPR(t *testing.T, ctx context.Context, nwo string, issueNum in
 		}
 	}
 	if added < 5 {
-		t.Errorf("delivery PR diff has only %d added lines, expected substantial changes", added)
+		t.Errorf("PR diff has only %d added lines, expected substantial changes", added)
 	} else {
-		t.Logf("verify: delivery PR diff — %d added lines ✓", added)
-	}
-
-	// Dev and test PRs should be closed
-	for _, prefix := range []string{"fleet/dev/", "fleet/test/"} {
-		head := fmt.Sprintf("%s%d", prefix, issueNum)
-		type closedPR struct {
-			Number int    `json:"number"`
-			State  string `json:"state"`
-		}
-		closed := ghJSON[[]closedPR](t, ctx, "pr", "list",
-			"--repo", nwo, "--head", head, "--state", "closed", "--json", "number,state")
-		if len(closed) > 0 {
-			t.Logf("verify: %s PR #%d CLOSED ✓", prefix, closed[0].Number)
-		} else {
-			t.Errorf("expected %s PR to be closed", head)
-		}
+		t.Logf("verify: PR diff — %d added lines ✓", added)
 	}
 
 	return pr.Number
@@ -354,24 +339,15 @@ func teardown(t *testing.T, ctx context.Context, owner, repo, repoDir string, is
 	}
 
 	// Existing repo: surgical cleanup
-	branches := []string{
-		fmt.Sprintf("fleet/dev/%d", issueNum),
-		fmt.Sprintf("fleet/test/%d", issueNum),
-		fmt.Sprintf("fleet/deliver/%d", issueNum),
-	}
+	branch := fmt.Sprintf("fleet/%d", issueNum)
+	closePRsForBranch(t, ctx, nwo, branch)
 
-	for _, branch := range branches {
-		closePRsForBranch(t, ctx, nwo, branch)
-	}
+	t.Logf("  deleting remote branch %s", branch)
+	ghQuiet(t, ctx, "", "api",
+		fmt.Sprintf("repos/%s/git/refs/heads/%s", nwo, branch),
+		"-X", "DELETE")
 
-	for _, branch := range branches {
-		t.Logf("  deleting remote branch %s", branch)
-		ghQuiet(t, ctx, "", "api",
-			fmt.Sprintf("repos/%s/git/refs/heads/%s", nwo, branch),
-			"-X", "DELETE")
-	}
-
-	for _, name := range []string{"dev", "test", "validate", "deliver"} {
+	for _, name := range []string{"impl"} {
 		dir := filepath.Join(repoDir, "worktrees", name)
 		if _, err := os.Stat(dir); err == nil {
 			t.Logf("  removing worktree %s", name)

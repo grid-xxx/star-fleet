@@ -67,6 +67,14 @@ func CurrentBranch(ctx context.Context, dir string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
+func CurrentHead(ctx context.Context, dir string) (string, error) {
+	out, err := runGit(ctx, dir, "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 func DiffNames(ctx context.Context, dir, base, head string, patterns ...string) ([]string, error) {
 	args := []string{"diff", "--name-only", base + ".." + head, "--"}
 	args = append(args, patterns...)
