@@ -4,35 +4,64 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
 
 type Config struct {
-	Agent    AgentConfig    `toml:"agent"`
-	Test     TestConfig     `toml:"test"`
-	Validate ValidateConfig `toml:"validate"`
+	Agent AgentConfig `toml:"agent"`
+	Watch WatchConfig `toml:"watch"`
+	CI    CIConfig    `toml:"ci"`
+	Test  TestConfig  `toml:"test"`
 }
 
 type AgentConfig struct {
 	Backend string `toml:"backend"`
 }
 
+type WatchConfig struct {
+	PollInterval Duration `toml:"poll_interval"`
+	Timeout      Duration `toml:"timeout"`
+	IdleTimeout  Duration `toml:"idle_timeout"`
+	MaxFixRounds int      `toml:"max_fix_rounds"`
+}
+
+type CIConfig struct {
+	Enabled        bool     `toml:"enabled"`
+	RequiredChecks []string `toml:"required_checks"`
+}
+
 type TestConfig struct {
 	Command string `toml:"command"`
 }
 
-type ValidateConfig struct {
-	MaxFixRounds int `toml:"max_fix_rounds"`
-	MaxCycles    int `toml:"max_cycles"`
+// Duration wraps time.Duration to support TOML string parsing (e.g. "30s", "2h").
+type Duration struct {
+	time.Duration
+}
+
+func (d *Duration) UnmarshalText(text []byte) error {
+	var err error
+	d.Duration, err = time.ParseDuration(string(text))
+	return err
+}
+
+func (d Duration) MarshalText() ([]byte, error) {
+	return []byte(d.Duration.String()), nil
 }
 
 func defaults() Config {
 	return Config{
 		Agent: AgentConfig{Backend: "claude-code"},
-		Validate: ValidateConfig{
-			MaxFixRounds: 3,
-			MaxCycles:    2,
+		Watch: WatchConfig{
+			PollInterval: Duration{30 * time.Second},
+			Timeout:      Duration{2 * time.Hour},
+			IdleTimeout:  Duration{30 * time.Minute},
+			MaxFixRounds: 5,
+		},
+		CI: CIConfig{
+			Enabled: true,
 		},
 	}
 }

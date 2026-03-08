@@ -15,25 +15,21 @@ import (
 type Phase string
 
 const (
-	PhaseNew      Phase = ""          // not started
-	PhaseIntake   Phase = "intake"    // issue fetched + validated
-	PhaseDispatch Phase = "dispatch"  // agents completed
-	PhasePush     Phase = "push"      // branches pushed
-	PhasePRs      Phase = "prs"       // PRs created
-	PhaseReview   Phase = "review"    // review completed
-	PhaseValidate Phase = "validate"  // cross-validation passed
-	PhaseDone     Phase = "done"      // delivery PR created, issue closed
+	PhaseNew       Phase = ""          // not started
+	PhaseIntake    Phase = "intake"    // issue fetched + validated
+	PhaseImplement Phase = "implement" // agent completed implementation + tests
+	PhasePR        Phase = "pr"       // branch pushed, PR created
+	PhaseWatch     Phase = "watch"    // watching PR for feedback
+	PhaseDone      Phase = "done"     // PR merged/closed, pipeline complete
 )
 
 var phaseOrder = map[Phase]int{
-	PhaseNew:      0,
-	PhaseIntake:   1,
-	PhaseDispatch: 2,
-	PhasePush:     3,
-	PhasePRs:      4,
-	PhaseReview:   5,
-	PhaseValidate: 6,
-	PhaseDone:     7,
+	PhaseNew:       0,
+	PhaseIntake:    1,
+	PhaseImplement: 2,
+	PhasePR:        3,
+	PhaseWatch:     4,
+	PhaseDone:      5,
 }
 
 func (p Phase) String() string {
@@ -65,25 +61,43 @@ type RunState struct {
 
 	BaseBranch string `json:"base_branch,omitempty"`
 	IssueTitle string `json:"issue_title,omitempty"`
-	DevBranch  string `json:"dev_branch"`
-	TestBranch string `json:"test_branch"`
+	Branch     string `json:"branch"`
 
-	DevAgentDone  bool `json:"dev_agent_done"`
-	TestAgentDone bool `json:"test_agent_done"`
+	AgentDone bool `json:"agent_done"`
 
-	DevPR  *PRInfo `json:"dev_pr,omitempty"`
-	TestPR *PRInfo `json:"test_pr,omitempty"`
+	PR *PRInfo `json:"pr,omitempty"`
 
-	ReviewDone bool `json:"review_done"`
-	ValCycle   int  `json:"val_cycle"`
-	ValRound   int  `json:"val_round"`
-
-	DeliverPR *PRInfo `json:"deliver_pr,omitempty"`
+	// Watch loop state
+	ProcessedEvents []string   `json:"processed_events,omitempty"`
+	FixCount        int        `json:"fix_count"`
+	WatchStartedAt  *time.Time `json:"watch_started_at,omitempty"`
+	LastEventAt     *time.Time `json:"last_event_at,omitempty"`
 
 	UpdatedAt time.Time `json:"updated_at"`
 
 	mu   sync.Mutex `json:"-"`
 	path string     `json:"-"`
+}
+
+// HasProcessedEvent returns true if the given event ID has already been handled.
+func (s *RunState) HasProcessedEvent(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range s.ProcessedEvents {
+		if e == id {
+			return true
+		}
+	}
+	return false
+}
+
+// RecordEvent marks an event as processed and updates LastEventAt.
+func (s *RunState) RecordEvent(id string) {
+	s.mu.Lock()
+	s.ProcessedEvents = append(s.ProcessedEvents, id)
+	now := time.Now()
+	s.LastEventAt = &now
+	s.mu.Unlock()
 }
 
 func statePath(repoRoot string, number int) string {
@@ -110,16 +124,14 @@ func Load(repoRoot string, number int) (*RunState, error) {
 
 // New creates a fresh run state for the given issue.
 func New(repoRoot, owner, repo string, number int) *RunState {
-	id := strconv.Itoa(number)
 	return &RunState{
-		Version:    1,
-		Phase:      PhaseNew,
-		Owner:      owner,
-		Repo:       repo,
-		Number:     number,
-		DevBranch:  "fleet/dev/" + id,
-		TestBranch: "fleet/test/" + id,
-		path:       statePath(repoRoot, number),
+		Version: 2,
+		Phase:   PhaseNew,
+		Owner:   owner,
+		Repo:    repo,
+		Number:  number,
+		Branch:  fmt.Sprintf("fleet/%d", number),
+		path:    statePath(repoRoot, number),
 	}
 }
 

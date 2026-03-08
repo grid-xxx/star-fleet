@@ -1,9 +1,15 @@
 [agent]
 backend = "claude-code"  # "claude-code" | "cursor"
 
+[watch]
+poll_interval = "30s"   # how often to check for new events
+timeout = "2h"          # max total watch time
+idle_timeout = "30m"    # exit if no new events for this long
+max_fix_rounds = 5      # max code fix iterations
+
+[ci]
+enabled = true          # watch CI check results
+required_checks = []    # specific check names to watch (empty = all)
+
 [test]
 command = ""  # override auto-detected test command, e.g. "go test ./..."
-
-[validate]
-max_fix_rounds = 3
-max_cycles = 2

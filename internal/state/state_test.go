@@ -7,7 +7,7 @@ import (
 )
 
 func TestPhaseOrdering(t *testing.T) {
-	phases := []Phase{PhaseNew, PhaseIntake, PhaseDispatch, PhasePush, PhasePRs, PhaseReview, PhaseValidate, PhaseDone}
+	phases := []Phase{PhaseNew, PhaseIntake, PhaseImplement, PhasePR, PhaseWatch, PhaseDone}
 	for i := 1; i < len(phases); i++ {
 		if !phases[i].AtLeast(phases[i-1]) {
 			t.Errorf("%s should be AtLeast %s", phases[i], phases[i-1])
@@ -30,11 +30,8 @@ func TestNewAndSaveLoad(t *testing.T) {
 	if s.Phase != PhaseNew {
 		t.Errorf("phase = %s, want new", s.Phase)
 	}
-	if s.DevBranch != "fleet/dev/42" {
-		t.Errorf("dev branch = %s", s.DevBranch)
-	}
-	if s.TestBranch != "fleet/test/42" {
-		t.Errorf("test branch = %s", s.TestBranch)
+	if s.Branch != "fleet/42" {
+		t.Errorf("branch = %s", s.Branch)
 	}
 
 	s.BaseBranch = "main"
@@ -112,16 +109,16 @@ func TestAdvancePersists(t *testing.T) {
 	dir := t.TempDir()
 	s := New(dir, "o", "r", 7)
 
-	s.DevAgentDone = true
-	if err := s.Advance(PhaseDispatch); err != nil {
+	s.AgentDone = true
+	if err := s.Advance(PhaseImplement); err != nil {
 		t.Fatal(err)
 	}
 
 	loaded, _ := Load(dir, 7)
-	if loaded.Phase != PhaseDispatch {
+	if loaded.Phase != PhaseImplement {
 		t.Errorf("phase = %s", loaded.Phase)
 	}
-	if !loaded.DevAgentDone {
-		t.Error("DevAgentDone should be true")
+	if !loaded.AgentDone {
+		t.Error("AgentDone should be true")
 	}
 }

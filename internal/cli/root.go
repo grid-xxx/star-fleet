@@ -14,7 +14,7 @@ var version = "dev"
 var rootCmd = &cobra.Command{
 	Use:   "fleet",
 	Short: "Star Fleet — autonomous PR delivery from GitHub issues",
-	Long:  "A CLI tool that takes a GitHub Issue and autonomously delivers a human-ready PR.\nTwo agents run in parallel — Dev writes implementation, Test writes tests — without seeing each other's work.",
+	Long:  "A CLI tool that takes a GitHub Issue and autonomously delivers a human-ready PR.\nA single agent implements the feature and writes tests, then watches the PR for review feedback and CI results.",
 }
 
 var versionCmd = &cobra.Command{

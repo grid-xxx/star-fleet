@@ -4,16 +4,14 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/nullne/star-fleet/internal/agent"
 	"github.com/nullne/star-fleet/internal/config"
 	"github.com/nullne/star-fleet/internal/gh"
 	"github.com/nullne/star-fleet/internal/git"
-	"github.com/nullne/star-fleet/internal/review"
 	"github.com/nullne/star-fleet/internal/state"
 	"github.com/nullne/star-fleet/internal/ui"
-	"github.com/nullne/star-fleet/internal/validate"
+	"github.com/nullne/star-fleet/internal/watch"
 )
 
 type Orchestrator struct {
@@ -24,6 +22,7 @@ type Orchestrator struct {
 	Display  *ui.Display
 	RepoRoot string
 	Restart  bool // when true, discard existing state and start fresh
+	NoWatch  bool // when true, skip the watch loop after creating PR
 }
 
 func (o *Orchestrator) Run(ctx context.Context) error {
@@ -58,16 +57,11 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		return err
 	}
 
-	// === WORKTREES (idempotent) ===
-	devDir, err := git.CreateWorktree(ctx, o.RepoRoot, "dev", s.DevBranch)
+	// === WORKTREE (single branch) ===
+	workdir, err := git.CreateWorktree(ctx, o.RepoRoot, "impl", s.Branch)
 	if err != nil {
-		o.Display.StepFail("Creating worktrees...", err.Error())
-		return fmt.Errorf("creating dev worktree: %w", err)
-	}
-	testDir, err := git.CreateWorktree(ctx, o.RepoRoot, "test", s.TestBranch)
-	if err != nil {
-		o.Display.StepFail("Creating worktrees...", err.Error())
-		return fmt.Errorf("creating test worktree: %w", err)
+		o.Display.StepFail("Creating worktree...", err.Error())
+		return fmt.Errorf("creating worktree: %w", err)
 	}
 	defer o.cleanup(ctx)
 
@@ -76,42 +70,37 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		return err
 	}
 
-	devAgent := &agent.DevAgent{
-		Backend: backend, Owner: o.Owner, Repo: o.Repo,
-		Issue: issue, Workdir: devDir,
-		Branch: s.DevBranch, BaseBranch: s.BaseBranch,
-	}
-	testAgent := &agent.TestAgent{
-		Backend: backend, Owner: o.Owner, Repo: o.Repo,
-		Issue: issue, Workdir: testDir,
-		Branch: s.TestBranch, BaseBranch: s.BaseBranch,
+	codeAgent := &agent.CodeAgent{
+		Backend:    backend,
+		Owner:      o.Owner,
+		Repo:       o.Repo,
+		Issue:      issue,
+		Workdir:    workdir,
+		Branch:     s.Branch,
+		BaseBranch: s.BaseBranch,
 	}
 
-	// === DISPATCH (run agents) ===
+	// === IMPLEMENT (single agent writes code + tests) ===
 	o.Display.Blank()
-	if err := o.phaseDispatch(ctx, s, devAgent, testAgent); err != nil {
+	if err := o.phaseImplement(ctx, s, codeAgent); err != nil {
 		return err
 	}
 
-	// === PUSH ===
-	if err := o.phasePush(ctx, s, devAgent, testAgent); err != nil {
-		return err
-	}
-
-	// === CREATE PRs ===
-	devPR, testPR, err := o.phasePRs(ctx, s, devAgent, testAgent)
+	// === PUSH + CREATE PR ===
+	pr, err := o.phasePR(ctx, s, codeAgent, issue)
 	if err != nil {
 		return err
 	}
 
-	// === REVIEW ===
-	o.Display.Blank()
-	if err := o.phaseReview(ctx, s, backend, devAgent, testAgent, devPR, testPR); err != nil {
-		return err
+	// === WATCH (respond to feedback loop) ===
+	if o.NoWatch {
+		o.Display.Info("--no-watch: skipping watch loop")
+		o.Display.Result(pr.URL)
+		return s.Advance(state.PhaseDone)
 	}
 
-	// === CROSS-VALIDATION + DELIVER ===
-	return o.phaseValidate(ctx, s, devAgent, testAgent, issue)
+	o.Display.Blank()
+	return o.phaseWatch(ctx, s, codeAgent, pr)
 }
 
 // ---------------------------------------------------------------------------
@@ -198,172 +187,82 @@ func (o *Orchestrator) validateSpec(ctx context.Context, issue *gh.Issue) error 
 
 func (o *Orchestrator) postPickedUp(ctx context.Context) error {
 	return gh.PostComment(ctx, o.Owner, o.Repo, o.Number,
-		"## 🚀 Star Fleet — Picked Up\n\nThis issue has been picked up by Star Fleet. Dev and Test agents are being dispatched.")
+		"## 🚀 Star Fleet — Picked Up\n\nThis issue has been picked up by Star Fleet. An agent is implementing the feature and writing tests.")
 }
 
 // ---------------------------------------------------------------------------
-// Phase: Dispatch (run agents, with per-agent checkpointing)
+// Phase: Implement (single agent writes implementation + tests)
 // ---------------------------------------------------------------------------
 
-func (o *Orchestrator) phaseDispatch(ctx context.Context, s *state.RunState, devAgent *agent.DevAgent, testAgent *agent.TestAgent) error {
-	if s.Phase.AtLeast(state.PhaseDispatch) {
-		o.Display.Step("Dev Agent", "done (cached)")
-		o.Display.Step("Test Agent", "done (cached)")
+func (o *Orchestrator) phaseImplement(ctx context.Context, s *state.RunState, codeAgent *agent.CodeAgent) error {
+	if s.Phase.AtLeast(state.PhaseImplement) {
+		o.Display.Step("Code Agent", "done (cached)")
 		return nil
 	}
 
 	lv := o.Display.StartLiveView([]ui.AgentConfig{
-		{Label: "Dev Agent", Tree: "├", Message: "Writing implementation..."},
-		{Label: "Test Agent", Tree: "└", Message: "Writing tests..."},
+		{Label: "Code Agent", Tree: "└", Message: "Implementing feature + writing tests..."},
 	})
 	defer lv.Stop()
 
-	devPanel := lv.Panel(0)
-	testPanel := lv.Panel(1)
+	panel := lv.Panel(0)
 
-	type agentResult struct {
-		role string
-		err  error
-	}
-
-	toRun := 0
-	if !s.DevAgentDone {
-		toRun++
-	}
-	if !s.TestAgentDone {
-		toRun++
-	}
-
-	results := make(chan agentResult, toRun)
-	var wg sync.WaitGroup
-
-	if s.DevAgentDone {
-		devPanel.Finish("success", "done (cached)")
+	if s.AgentDone {
+		panel.Finish("success", "done (cached)")
 	} else {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			err := devAgent.Run(ctx, devPanel)
-			if err == nil {
-				s.DevAgentDone = true
-				_ = s.Save()
-			}
-			results <- agentResult{role: "dev", err: err}
-		}()
-	}
-
-	if s.TestAgentDone {
-		testPanel.Finish("success", "done (cached)")
-	} else {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			err := testAgent.Run(ctx, testPanel)
-			if err == nil {
-				s.TestAgentDone = true
-				_ = s.Save()
-			}
-			results <- agentResult{role: "test", err: err}
-		}()
-	}
-
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	var devErr, testErr error
-	for r := range results {
-		switch r.role {
-		case "dev":
-			if r.err != nil {
-				devErr = r.err
-				devPanel.Finish("fail", r.err.Error())
-			} else {
-				devPanel.Finish("success", "done")
-			}
-		case "test":
-			if r.err != nil {
-				testErr = r.err
-				testPanel.Finish("fail", r.err.Error())
-			} else {
-				testPanel.Finish("success", "done")
-			}
+		err := codeAgent.Run(ctx, panel)
+		if err != nil {
+			panel.Finish("fail", err.Error())
+			return fmt.Errorf("code agent: %w", err)
 		}
+		panel.Finish("success", "done")
+		s.AgentDone = true
+		_ = s.Save()
 	}
 
-	if devErr != nil {
-		return fmt.Errorf("dev agent: %w", devErr)
-	}
-	if testErr != nil {
-		return fmt.Errorf("test agent: %w", testErr)
-	}
-
-	return s.Advance(state.PhaseDispatch)
+	return s.Advance(state.PhaseImplement)
 }
 
 // ---------------------------------------------------------------------------
-// Phase: Push (idempotent — git push is a no-op if already up to date)
+// Phase: PR (push branch + create PR)
 // ---------------------------------------------------------------------------
 
-func (o *Orchestrator) phasePush(ctx context.Context, s *state.RunState, devAgent *agent.DevAgent, testAgent *agent.TestAgent) error {
-	if s.Phase.AtLeast(state.PhasePush) {
-		return nil
+func (o *Orchestrator) phasePR(ctx context.Context, s *state.RunState, codeAgent *agent.CodeAgent, issue *gh.Issue) (*gh.PR, error) {
+	if s.Phase.AtLeast(state.PhasePR) {
+		pr := &gh.PR{Number: s.PR.Number, URL: s.PR.URL}
+		o.Display.Step(fmt.Sprintf("PR #%d", pr.Number), pr.URL)
+		return pr, nil
 	}
 
-	if err := git.Push(ctx, devAgent.Workdir, "origin", devAgent.Branch); err != nil {
-		o.Display.StepFail("Pushing branches...", fmt.Sprintf("dev: %v", err))
-		return fmt.Errorf("pushing dev branch: %w", err)
+	// Push
+	if err := git.Push(ctx, codeAgent.Workdir, "origin", codeAgent.Branch); err != nil {
+		o.Display.StepFail("Pushing branch...", err.Error())
+		return nil, fmt.Errorf("pushing branch: %w", err)
 	}
+	o.Display.Step("Pushing branch...", "")
 
-	if err := git.Push(ctx, testAgent.Workdir, "origin", testAgent.Branch); err != nil {
-		o.Display.StepFail("Pushing branches...", fmt.Sprintf("test: %v", err))
-		return fmt.Errorf("pushing test branch: %w", err)
-	}
+	// Create PR
+	title := fmt.Sprintf("#%d %s", o.Number, issue.Title)
+	body := fmt.Sprintf("## Star Fleet\n\nCloses #%d\n\n"+
+		"This PR was generated by Star Fleet. "+
+		"Implementation and tests were written by a single code agent.\n\n"+
+		"The agent is watching this PR and will respond to review comments and CI results.",
+		o.Number)
 
-	o.Display.Step("Pushing branches...", "")
-	return s.Advance(state.PhasePush)
-}
-
-// ---------------------------------------------------------------------------
-// Phase: PRs (idempotent — checks for existing PR before creating)
-// ---------------------------------------------------------------------------
-
-func (o *Orchestrator) phasePRs(ctx context.Context, s *state.RunState, devAgent *agent.DevAgent, testAgent *agent.TestAgent) (*gh.PR, *gh.PR, error) {
-	if s.Phase.AtLeast(state.PhasePRs) {
-		devPR := &gh.PR{Number: s.DevPR.Number, URL: s.DevPR.URL}
-		testPR := &gh.PR{Number: s.TestPR.Number, URL: s.TestPR.URL}
-		o.Display.Step(fmt.Sprintf("Dev PR #%d", devPR.Number), devPR.URL)
-		o.Display.Step(fmt.Sprintf("Test PR #%d", testPR.Number), testPR.URL)
-		return devPR, testPR, nil
-	}
-
-	devPR, err := o.findOrCreatePR(ctx, devAgent.Workdir,
-		fmt.Sprintf("[fleet/dev] #%d %s", devAgent.Issue.Number, devAgent.Issue.Title),
-		fmt.Sprintf("Implementation for #%d by Star Fleet Dev Agent.", devAgent.Issue.Number),
-		s.BaseBranch, devAgent.Branch)
+	pr, err := o.findOrCreatePR(ctx, codeAgent.Workdir, title, body, s.BaseBranch, s.Branch)
 	if err != nil {
-		o.Display.StepFail("Creating dev PR...", err.Error())
-		return nil, nil, fmt.Errorf("creating dev PR: %w", err)
+		o.Display.StepFail("Creating PR...", err.Error())
+		return nil, fmt.Errorf("creating PR: %w", err)
 	}
-	o.Display.Step(fmt.Sprintf("Dev PR #%d", devPR.Number), devPR.URL)
+	o.Display.Step(fmt.Sprintf("PR #%d", pr.Number), pr.URL)
 
-	testPR, err := o.findOrCreatePR(ctx, testAgent.Workdir,
-		fmt.Sprintf("[fleet/test] #%d %s", testAgent.Issue.Number, testAgent.Issue.Title),
-		fmt.Sprintf("Tests for #%d by Star Fleet Test Agent.", testAgent.Issue.Number),
-		s.BaseBranch, testAgent.Branch)
-	if err != nil {
-		o.Display.StepFail("Creating test PR...", err.Error())
-		return nil, nil, fmt.Errorf("creating test PR: %w", err)
+	s.PR = &state.PRInfo{Number: pr.Number, URL: pr.URL}
+	if err := s.Advance(state.PhasePR); err != nil {
+		return nil, err
 	}
-	o.Display.Step(fmt.Sprintf("Test PR #%d", testPR.Number), testPR.URL)
 
-	s.DevPR = &state.PRInfo{Number: devPR.Number, URL: devPR.URL}
-	s.TestPR = &state.PRInfo{Number: testPR.Number, URL: testPR.URL}
-	if err := s.Advance(state.PhasePRs); err != nil {
-		return nil, nil, err
-	}
-	return devPR, testPR, nil
+	o.Display.Result(pr.URL)
+	return pr, nil
 }
 
 func (o *Orchestrator) findOrCreatePR(ctx context.Context, workdir, title, body, base, head string) (*gh.PR, error) {
@@ -378,219 +277,43 @@ func (o *Orchestrator) findOrCreatePR(ctx context.Context, workdir, title, body,
 }
 
 // ---------------------------------------------------------------------------
-// Phase: Review
+// Phase: Watch (respond to PR feedback)
 // ---------------------------------------------------------------------------
 
-func (o *Orchestrator) phaseReview(ctx context.Context, s *state.RunState, backend agent.Backend, devAgent *agent.DevAgent, testAgent *agent.TestAgent, devPR, testPR *gh.PR) error {
-	if s.Phase.AtLeast(state.PhaseReview) {
-		o.Display.Step("Reviewing PRs...", "(cached)")
-		return nil
-	}
-
-	if err := o.reviewLoop(ctx, backend, devAgent, testAgent, devPR, testPR); err != nil {
-		return err
-	}
-
-	return s.Advance(state.PhaseReview)
-}
-
-func (o *Orchestrator) reviewLoop(ctx context.Context, backend agent.Backend, devAgent *agent.DevAgent, testAgent *agent.TestAgent, devPR, testPR *gh.PR) error {
-	o.Display.Info("Reviewing PRs...")
-
-	devResult, err := review.ReviewPR(ctx, backend, devAgent.Workdir, o.Owner, o.Repo, devPR.Number, "dev")
-	if err != nil {
-		return fmt.Errorf("reviewing dev PR: %w", err)
-	}
-
-	if devResult.Clean {
-		o.Display.Step(fmt.Sprintf("PR #%d", devPR.Number), "")
-	} else {
-		count := review.CountIssues(devResult.Feedback)
-		o.Display.StepWarn(fmt.Sprintf("PR #%d", devPR.Number), fmt.Sprintf("%d comments posted", count))
-		if err := devAgent.Fix(ctx, devResult.Feedback); err != nil {
-			return fmt.Errorf("dev fix: %w", err)
-		}
-		if err := git.Push(ctx, devAgent.Workdir, "origin", devAgent.Branch); err != nil {
-			return fmt.Errorf("pushing dev fixes: %w", err)
-		}
-	}
-
-	testResult, err := review.ReviewPR(ctx, backend, testAgent.Workdir, o.Owner, o.Repo, testPR.Number, "test")
-	if err != nil {
-		return fmt.Errorf("reviewing test PR: %w", err)
-	}
-
-	if testResult.Clean {
-		o.Display.Step(fmt.Sprintf("PR #%d", testPR.Number), "")
-	} else {
-		count := review.CountIssues(testResult.Feedback)
-		o.Display.StepWarn(fmt.Sprintf("PR #%d", testPR.Number), fmt.Sprintf("%d comments posted", count))
-		if err := testAgent.Fix(ctx, testResult.Feedback); err != nil {
-			return fmt.Errorf("test fix: %w", err)
-		}
-		if err := git.Push(ctx, testAgent.Workdir, "origin", testAgent.Branch); err != nil {
-			return fmt.Errorf("pushing test fixes: %w", err)
-		}
-	}
-
-	return nil
-}
-
-// ---------------------------------------------------------------------------
-// Phase: Cross-validation + Deliver
-// ---------------------------------------------------------------------------
-
-func (o *Orchestrator) phaseValidate(ctx context.Context, s *state.RunState, devAgent *agent.DevAgent, testAgent *agent.TestAgent, issue *gh.Issue) error {
+func (o *Orchestrator) phaseWatch(ctx context.Context, s *state.RunState, codeAgent *agent.CodeAgent, pr *gh.PR) error {
 	if s.Phase.AtLeast(state.PhaseDone) {
 		return nil
 	}
 
-	maxCycles := o.Config.Validate.MaxCycles
-	maxRounds := o.Config.Validate.MaxFixRounds
-
-	startCycle := s.ValCycle
-	if startCycle == 0 {
-		startCycle = 1
-	}
-	startRound := s.ValRound
-	if startRound == 0 {
-		startRound = 1
-	}
-
-	for cycle := startCycle; cycle <= maxCycles; cycle++ {
-		roundStart := 1
-		if cycle == startCycle {
-			roundStart = startRound
-		}
-		for round := roundStart; round <= maxRounds; round++ {
-			s.ValCycle = cycle
-			s.ValRound = round
-			_ = s.Save()
-
-			label := fmt.Sprintf("Cross-validation (round %d)", round)
-
-			result, err := validate.CrossValidate(ctx, o.RepoRoot, s.DevBranch, s.TestBranch, s.BaseBranch, o.Config.Test.Command)
-			if err != nil {
-				o.Display.StepFail(label, err.Error())
-				return err
-			}
-
-			if result.Passed {
-				passed := result.TotalCount
-				if passed == 0 {
-					passed = result.FailCount
-				}
-				o.Display.Step(label, fmt.Sprintf("%d/%d passed", passed, passed))
-
-				if err := o.deliver(ctx, s, issue); err != nil {
-					return err
-				}
-				return nil
-			}
-
-			attr := result.Attribution
-			if len(attr) > 0 {
-				attr = strings.ToUpper(attr[:1]) + attr[1:]
-			}
-			o.Display.StepFail(label, fmt.Sprintf(
-				"%d failed → %s Agent fixing", result.FailCount, attr))
-
-			if err := o.fixFromValidation(ctx, devAgent, testAgent, result); err != nil {
-				return err
-			}
-			validate.Cleanup(ctx, o.RepoRoot)
+	if !s.Phase.AtLeast(state.PhaseWatch) {
+		if err := s.Advance(state.PhaseWatch); err != nil {
+			return err
 		}
 	}
 
-	summary := fmt.Sprintf(
-		"Star Fleet was unable to deliver a passing implementation after %d cycles × %d rounds.\n\nThe pipeline has been halted. Manual intervention is required.",
-		maxCycles, maxRounds)
-	_ = gh.PostComment(ctx, o.Owner, o.Repo, o.Number, "## ⚠️ Star Fleet — Pipeline Exhausted\n\n"+summary)
-	o.Display.FailResult("Pipeline exhausted after max retries. Failure summary posted to issue.")
-	return fmt.Errorf("pipeline exhausted")
-}
+	o.Display.Info(fmt.Sprintf("Entering watch loop for PR #%d", pr.Number))
 
-func (o *Orchestrator) deliver(ctx context.Context, s *state.RunState, issue *gh.Issue) error {
-	finalBranch := fmt.Sprintf("fleet/deliver/%d", o.Number)
-
-	finalDir, err := git.CreateWorktree(ctx, o.RepoRoot, "deliver", finalBranch)
+	result, err := watch.Loop(ctx, codeAgent, s, o.Config, o.Display)
 	if err != nil {
-		return fmt.Errorf("creating delivery worktree: %w", err)
-	}
-	defer func() {
-		_ = git.RemoveWorktree(ctx, o.RepoRoot, "deliver")
-	}()
-
-	if err := git.Merge(ctx, finalDir, s.DevBranch); err != nil {
-		return fmt.Errorf("merging dev into delivery: %w", err)
-	}
-	if err := git.Merge(ctx, finalDir, s.TestBranch); err != nil {
-		return fmt.Errorf("merging test into delivery: %w", err)
+		return fmt.Errorf("watch loop: %w", err)
 	}
 
-	if err := git.Push(ctx, finalDir, "origin", finalBranch); err != nil {
-		return fmt.Errorf("pushing delivery branch: %w", err)
+	switch result.Reason {
+	case watch.ExitMerged:
+		o.Display.Success(fmt.Sprintf("PR #%d merged — done!", pr.Number))
+	case watch.ExitClosed:
+		o.Display.Warn(fmt.Sprintf("PR #%d closed without merge", pr.Number))
+	case watch.ExitTimeout:
+		o.Display.Warn("Watch loop timed out")
+	case watch.ExitIdle:
+		o.Display.Warn("Watch loop exited due to inactivity")
+	case watch.ExitMaxFix:
+		o.Display.Warn("Watch loop exited — max fix rounds reached")
 	}
 
-	body := fmt.Sprintf(
-		"## Star Fleet Delivery\n\nCloses #%d\n\n"+
-			"This PR was generated by Star Fleet. "+
-			"Implementation and tests were written by independent agents and cross-validated.\n\n"+
-			"### Included PRs\n"+
-			"| Role | PR | Branch |\n"+
-			"|------|-----|--------|\n"+
-			"| Implementation | #%d | `%s` |\n"+
-			"| Tests | #%d | `%s` |\n",
-		o.Number,
-		s.DevPR.Number, s.DevBranch,
-		s.TestPR.Number, s.TestBranch)
-
-	pr, err := o.findOrCreatePR(ctx, finalDir,
-		fmt.Sprintf("#%d %s", o.Number, issue.Title),
-		body,
-		s.BaseBranch, finalBranch)
-	if err != nil {
-		return fmt.Errorf("creating final PR: %w", err)
-	}
-
-	s.DeliverPR = &state.PRInfo{Number: pr.Number, URL: pr.URL}
-	o.Display.Result(pr.URL)
-
-	// Close intermediate PRs — they're merged into the delivery branch
-	closeMsg := fmt.Sprintf("Merged into delivery PR #%d.", pr.Number)
-	_ = gh.PostComment(ctx, o.Owner, o.Repo, s.DevPR.Number, closeMsg)
-	_ = gh.ClosePR(ctx, o.Owner, o.Repo, s.DevPR.Number)
-	_ = gh.PostComment(ctx, o.Owner, o.Repo, s.TestPR.Number, closeMsg)
-	_ = gh.ClosePR(ctx, o.Owner, o.Repo, s.TestPR.Number)
-
-	// Issue is NOT closed here — "Closes #N" in PR body auto-closes on merge
 	return s.Advance(state.PhaseDone)
 }
 
-func (o *Orchestrator) fixFromValidation(ctx context.Context, devAgent *agent.DevAgent, testAgent *agent.TestAgent, result *validate.Result) error {
-	feedback := fmt.Sprintf("Cross-validation failed. Test output:\n\n```\n%s\n```\n\nFix the issues so all tests pass.", result.Output)
-
-	switch result.Attribution {
-	case "dev":
-		if err := devAgent.Fix(ctx, feedback); err != nil {
-			return fmt.Errorf("dev fix: %w", err)
-		}
-		if err := git.Push(ctx, devAgent.Workdir, "origin", devAgent.Branch); err != nil {
-			return fmt.Errorf("pushing dev fixes: %w", err)
-		}
-	case "test":
-		if err := testAgent.Fix(ctx, feedback); err != nil {
-			return fmt.Errorf("test fix: %w", err)
-		}
-		if err := git.Push(ctx, testAgent.Workdir, "origin", testAgent.Branch); err != nil {
-			return fmt.Errorf("pushing test fixes: %w", err)
-		}
-	}
-	return nil
-}
-
 func (o *Orchestrator) cleanup(ctx context.Context) {
-	_ = git.RemoveWorktree(ctx, o.RepoRoot, "dev")
-	_ = git.RemoveWorktree(ctx, o.RepoRoot, "test")
-	_ = git.RemoveWorktree(ctx, o.RepoRoot, "validate")
+	_ = git.RemoveWorktree(ctx, o.RepoRoot, "impl")
 }
