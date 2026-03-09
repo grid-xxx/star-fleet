@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"path/filepath"
 	"time"
 
@@ -127,4 +128,16 @@ func Load(repoRoot string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// Summary returns a human-readable config summary for display at startup.
+func (c *Config) Summary() string {
+	lines := []string{
+		fmt.Sprintf("agent.backend      = %s", c.Agent.Backend),
+		fmt.Sprintf("review.enabled     = %v", c.Review.Enabled),
+		fmt.Sprintf("review.max_rounds  = %d", c.Review.MaxRounds),
+		fmt.Sprintf("watch.timeout      = %s", c.Watch.Timeout.String()),
+		fmt.Sprintf("watch.auto_merge   = %v", c.Watch.AutoMerge),
+	}
+	return strings.Join(lines, "\n")
 }
