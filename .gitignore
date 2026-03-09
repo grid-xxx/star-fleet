@@ -7,6 +7,13 @@ worktrees/
 # Review output (ephemeral)
 .fleet-review-output.md
 
+# Runtime logs and state
+.fleet/runs/
+*.log
+passed_count.txt
+prs.txt
+test_results.txt
+
 # Go
 *.exe
 *.test
