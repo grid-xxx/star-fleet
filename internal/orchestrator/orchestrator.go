@@ -31,7 +31,8 @@ type GHClient interface {
 
 // ReviewRunner abstracts the review process for testing.
 type ReviewRunner interface {
-	Review(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error)
+	// Review runs the review agent and returns (feedback, issuesCount, error)
+	Review(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (string, int, error)
 }
 
 // GitClient abstracts git operations for testing.
@@ -129,14 +130,14 @@ type defaultReview struct {
 	backend BackendFactory
 }
 
-func (d defaultReview) Review(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+func (d defaultReview) Review(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (string, int, error) {
 	backendName := cfg.Backend
 	if backendName == "" {
 		backendName = "claude-code"
 	}
 	b, err := d.backend.NewBackend(backendName)
 	if err != nil {
-		return 0, err
+		return "", 0, err
 	}
 	r := &review.Reviewer{Agent: b, GH: d.gh}
 	return r.Review(ctx, owner, repo, prNumber, cfg)
@@ -546,7 +547,7 @@ func (o *Orchestrator) phaseReview(ctx context.Context, s *state.RunState, codeA
 	for round := s.ReviewRound + 1; round <= maxRounds; round++ {
 		o.Display.Step("Code Review", fmt.Sprintf("round %d/%d...", round, maxRounds))
 
-		issues, err := o.Reviewer.Review(ctx, o.Owner, o.Repo, pr.Number, &o.Config.Review)
+		feedback, issues, err := o.Reviewer.Review(ctx, o.Owner, o.Repo, pr.Number, &o.Config.Review)
 		if err != nil {
 			o.Display.StepFail("Code Review", err.Error())
 			return fmt.Errorf("review round %d: %w", round, err)
@@ -570,7 +571,9 @@ func (o *Orchestrator) phaseReview(ctx context.Context, s *state.RunState, codeA
 		_ = o.GH.PostComment(ctx, o.Owner, o.Repo, pr.Number,
 			fmt.Sprintf("🔧 Addressing review feedback (round %d/%d)...", round, maxRounds))
 
-		if err := codeAgent.Fix(ctx, fmt.Sprintf("Address the code review feedback from round %d. Check the PR review comments for details.", round)); err != nil {
+		fixPrompt := fmt.Sprintf("Address the code review feedback from round %d.\n\nReview feedback:\n%s\n\nFix the issues, commit, and push.", round, feedback)
+		
+		if err := codeAgent.Fix(ctx, fixPrompt); err != nil {
 			return fmt.Errorf("fixing review issues (round %d): %w", round, err)
 		}
 

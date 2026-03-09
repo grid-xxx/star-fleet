@@ -133,7 +133,7 @@ func TestReview_EmptyDiff(t *testing.T) {
 		},
 	}
 
-	issues, err := r.Review(context.Background(), "owner", "repo", 1, defaultCfg())
+	_, issues, err := r.Review(context.Background(), "owner", "repo", 1, defaultCfg())
 	if err != nil {
 		t.Fatalf("Review() error = %v", err)
 	}
@@ -153,7 +153,7 @@ func TestReview_DiffFetchError(t *testing.T) {
 		},
 	}
 
-	_, err := r.Review(context.Background(), "owner", "repo", 1, defaultCfg())
+	_, _, err := r.Review(context.Background(), "owner", "repo", 1, defaultCfg())
 	if err == nil {
 		t.Fatal("Review() expected error, got nil")
 	}
@@ -182,16 +182,15 @@ func TestReview_AgentApproves(t *testing.T) {
 		},
 	}
 
-	issues, err := r.Review(context.Background(), "owner", "repo", 1, defaultCfg())
+	_, issues, err := r.Review(context.Background(), "owner", "repo", 1, defaultCfg())
 	if err != nil {
 		t.Fatalf("Review() error = %v", err)
 	}
 	if issues != 0 {
 		t.Errorf("Review() issues = %d, want 0", issues)
 	}
-	if submittedEvent != "APPROVE" {
-		t.Errorf("submitted event = %q, want APPROVE", submittedEvent)
-	}
+	// Review no longer submits to GitHub; just returns approval with 0 issues
+	_ = submittedEvent
 }
 
 func TestReview_SubmitApprovalError(t *testing.T) {
@@ -208,12 +207,10 @@ func TestReview_SubmitApprovalError(t *testing.T) {
 		},
 	}
 
-	_, err := r.Review(context.Background(), "owner", "repo", 1, defaultCfg())
-	if err == nil {
-		t.Fatal("Review() expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "submitting approval") {
-		t.Errorf("expected 'submitting approval' in error, got %v", err)
+	// Review no longer submits to GitHub, so no submission error expected
+	_, _, err := r.Review(context.Background(), "owner", "repo", 1, defaultCfg())
+	if err != nil {
+		t.Fatalf("Review() unexpected error = %v", err)
 	}
 }
 

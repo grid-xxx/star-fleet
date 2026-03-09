@@ -163,14 +163,14 @@ func (m *mockBackendFactory) NewBackend(name string) (agent.Backend, error) {
 }
 
 type mockReviewer struct {
-	review func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error)
+	review func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (string, int, error)
 }
 
-func (m *mockReviewer) Review(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+func (m *mockReviewer) Review(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (string, int, error) {
 	if m.review != nil {
 		return m.review(ctx, owner, repo, prNumber, cfg)
 	}
-	return 0, nil
+	return "", 0, nil
 }
 
 type noopBackend struct{}
@@ -1544,9 +1544,9 @@ func TestPhaseReview_AlreadyPast(t *testing.T) {
 	t.Parallel()
 	o := baseOrchestrator(t)
 	o.Reviewer = &mockReviewer{
-		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (string, int, error) {
 			t.Error("Review should not be called when already past review")
-			return 0, nil
+			return "", 0, nil
 		},
 	}
 
@@ -1566,9 +1566,9 @@ func TestPhaseReview_Disabled(t *testing.T) {
 	o := baseOrchestrator(t)
 	o.Config.Review.Enabled = false
 	o.Reviewer = &mockReviewer{
-		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (string, int, error) {
 			reviewCalled = true
-			return 0, nil
+			return "", 0, nil
 		},
 	}
 
@@ -1594,9 +1594,9 @@ func TestPhaseReview_NoReviewFlag(t *testing.T) {
 	o := baseOrchestrator(t)
 	o.NoReview = true
 	o.Reviewer = &mockReviewer{
-		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (string, int, error) {
 			reviewCalled = true
-			return 0, nil
+			return "", 0, nil
 		},
 	}
 
@@ -1620,8 +1620,8 @@ func TestPhaseReview_ApprovedFirstRound(t *testing.T) {
 	t.Parallel()
 	o := baseOrchestrator(t)
 	o.Reviewer = &mockReviewer{
-		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
-			return 0, nil
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (string, int, error) {
+			return "", 0, nil
 		},
 	}
 
@@ -1648,12 +1648,12 @@ func TestPhaseReview_FixAndApproveSecondRound(t *testing.T) {
 
 	o := baseOrchestrator(t)
 	o.Reviewer = &mockReviewer{
-		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (string, int, error) {
 			round++
 			if round == 1 {
-				return 2, nil
+				return "fix this", 2, nil
 			}
-			return 0, nil
+			return "", 0, nil
 		},
 	}
 	o.Git = &mockGit{
@@ -1689,9 +1689,9 @@ func TestPhaseReview_MaxRoundsReached(t *testing.T) {
 	o := baseOrchestrator(t)
 	o.Config.Review.MaxRounds = 2
 	o.Reviewer = &mockReviewer{
-		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (string, int, error) {
 			reviewCount++
-			return 3, nil
+			return "fix this", 3, nil
 		},
 	}
 
@@ -1715,8 +1715,8 @@ func TestPhaseReview_ReviewError(t *testing.T) {
 	t.Parallel()
 	o := baseOrchestrator(t)
 	o.Reviewer = &mockReviewer{
-		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
-			return 0, errors.New("review agent crashed")
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (string, int, error) {
+			return "", 0, errors.New("review agent crashed")
 		},
 	}
 
@@ -1737,8 +1737,8 @@ func TestPhaseReview_FixPushError(t *testing.T) {
 	t.Parallel()
 	o := baseOrchestrator(t)
 	o.Reviewer = &mockReviewer{
-		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
-			return 1, nil
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (string, int, error) {
+			return "fix this", 1, nil
 		},
 	}
 	o.Git = &mockGit{
@@ -1772,8 +1772,8 @@ func TestPhaseReview_PostsGitHubComments(t *testing.T) {
 		},
 	}
 	o.Reviewer = &mockReviewer{
-		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
-			return 0, nil
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (string, int, error) {
+			return "", 0, nil
 		},
 	}
 
@@ -1819,9 +1819,9 @@ func TestRun_NoReviewFlag(t *testing.T) {
 	o := baseOrchestrator(t)
 	o.NoReview = true
 	o.Reviewer = &mockReviewer{
-		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (string, int, error) {
 			reviewCalled = true
-			return 0, nil
+			return "", 0, nil
 		},
 	}
 
@@ -1845,9 +1845,9 @@ func TestRun_ReviewOnly(t *testing.T) {
 		},
 	}
 	o.Reviewer = &mockReviewer{
-		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (string, int, error) {
 			reviewCalled = true
-			return 0, nil
+			return "", 0, nil
 		},
 	}
 

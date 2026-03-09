@@ -45,6 +45,7 @@ type ReviewConfig struct {
 	MaxRounds  int    `toml:"max_rounds"`
 	Backend    string `toml:"backend"`
 	PromptFile string `toml:"prompt_file"`
+	Name       string `toml:"name"` // display name in logs
 }
 
 type TelegramConfig struct {
@@ -73,6 +74,7 @@ func defaults() Config {
 		Review: ReviewConfig{
 			Enabled:   true,
 			MaxRounds: 3,
+			Name:      "Code Review",
 		},
 		Watch: WatchConfig{
 			PollInterval: Duration{30 * time.Second},
