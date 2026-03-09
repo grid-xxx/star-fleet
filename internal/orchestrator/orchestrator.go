@@ -24,6 +24,7 @@ type GHClient interface {
 	FindPR(ctx context.Context, owner, repo, head string) (*gh.PR, error)
 	CreatePR(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*gh.PR, error)
 	MergePR(ctx context.Context, owner, repo string, number int) error
+	ClosePR(ctx context.Context, owner, repo string, number int) error
 	GetPRDiff(ctx context.Context, owner, repo string, prNumber int) (string, error)
 	SubmitReview(ctx context.Context, owner, repo string, prNumber int, event, body string) error
 }
@@ -37,6 +38,8 @@ type ReviewRunner interface {
 type GitClient interface {
 	CreateWorktree(ctx context.Context, repoRoot, name, branch string) (string, error)
 	RemoveWorktree(ctx context.Context, repoRoot, name string) error
+	PruneWorktrees(ctx context.Context, repoRoot string) error
+	DeleteRemoteBranch(ctx context.Context, repoRoot, remote, branch string) error
 	Push(ctx context.Context, dir, remote, branch string) error
 }
 
@@ -78,6 +81,9 @@ func (defaultGH) CreatePR(ctx context.Context, owner, repo, workdir, title, body
 func (defaultGH) MergePR(ctx context.Context, owner, repo string, number int) error {
 	return gh.MergePR(ctx, owner, repo, number)
 }
+func (defaultGH) ClosePR(ctx context.Context, owner, repo string, number int) error {
+	return gh.ClosePR(ctx, owner, repo, number)
+}
 func (defaultGH) GetPRDiff(ctx context.Context, owner, repo string, prNumber int) (string, error) {
 	return gh.GetPRDiff(ctx, owner, repo, prNumber)
 }
@@ -92,6 +98,12 @@ func (defaultGit) CreateWorktree(ctx context.Context, repoRoot, name, branch str
 }
 func (defaultGit) RemoveWorktree(ctx context.Context, repoRoot, name string) error {
 	return git.RemoveWorktree(ctx, repoRoot, name)
+}
+func (defaultGit) PruneWorktrees(ctx context.Context, repoRoot string) error {
+	return git.PruneWorktrees(ctx, repoRoot)
+}
+func (defaultGit) DeleteRemoteBranch(ctx context.Context, repoRoot, remote, branch string) error {
+	return git.DeleteRemoteBranch(ctx, repoRoot, remote, branch)
 }
 func (defaultGit) Push(ctx context.Context, dir, remote, branch string) error {
 	return git.Push(ctx, dir, remote, branch)
@@ -196,7 +208,7 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		}
 	}()
 
-	s, err := o.loadState()
+	s, err := o.loadState(ctx)
 	if err != nil {
 		return err
 	}
@@ -304,6 +316,7 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 
 func (o *Orchestrator) loadState() (*state.RunState, error) {
 	if o.Restart {
+		o.restartCleanup()
 		return o.State.New(o.RepoRoot, o.Owner, o.Repo, o.Number), nil
 	}
 	s, err := o.State.Load(o.RepoRoot, o.Number)
@@ -314,6 +327,33 @@ func (o *Orchestrator) loadState() (*state.RunState, error) {
 		return s, nil
 	}
 	return o.State.New(o.RepoRoot, o.Owner, o.Repo, o.Number), nil
+}
+
+func (o *Orchestrator) restartCleanup() {
+	ctx := context.Background()
+	branch := fmt.Sprintf("fleet/%d", o.Number)
+
+	old, err := o.State.Load(o.RepoRoot, o.Number)
+	if err != nil {
+		o.Display.Warn(fmt.Sprintf("restart: could not load old state: %v", err))
+	}
+
+	if err := o.Git.RemoveWorktree(ctx, o.RepoRoot, "impl"); err != nil {
+		o.Display.Warn(fmt.Sprintf("restart: removing worktree: %v", err))
+	}
+	if err := o.Git.PruneWorktrees(ctx, o.RepoRoot); err != nil {
+		o.Display.Warn(fmt.Sprintf("restart: pruning worktrees: %v", err))
+	}
+
+	if err := o.Git.DeleteRemoteBranch(ctx, o.RepoRoot, "origin", branch); err != nil {
+		o.Display.Warn(fmt.Sprintf("restart: deleting remote branch %s: %v", branch, err))
+	}
+
+	if old != nil && old.PR != nil {
+		if err := o.GH.ClosePR(ctx, o.Owner, o.Repo, old.PR.Number); err != nil {
+			o.Display.Warn(fmt.Sprintf("restart: closing PR #%d: %v", old.PR.Number, err))
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
