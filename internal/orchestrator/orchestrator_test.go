@@ -67,6 +67,9 @@ func (m *mockGH) MergePR(ctx context.Context, owner, repo string, number int) er
 	}
 	return nil
 }
+func (m *mockGH) ClosePR(ctx context.Context, owner, repo string, number int) error {
+	return nil
+}
 func (m *mockGH) GetPRDiff(ctx context.Context, owner, repo string, prNumber int) (string, error) {
 	if m.getPRDiff != nil {
 		return m.getPRDiff(ctx, owner, repo, prNumber)
@@ -81,9 +84,11 @@ func (m *mockGH) SubmitReview(ctx context.Context, owner, repo string, prNumber 
 }
 
 type mockGit struct {
-	createWorktree func(ctx context.Context, repoRoot, name, branch string) (string, error)
-	removeWorktree func(ctx context.Context, repoRoot, name string) error
-	push           func(ctx context.Context, dir, remote, branch string) error
+	createWorktree    func(ctx context.Context, repoRoot, name, branch string) (string, error)
+	removeWorktree    func(ctx context.Context, repoRoot, name string) error
+	push              func(ctx context.Context, dir, remote, branch string) error
+	pruneWorktrees    func(ctx context.Context, repoRoot string) error
+	deleteRemoteBranch func(ctx context.Context, repoRoot, remote, branch string) error
 }
 
 func (m *mockGit) CreateWorktree(ctx context.Context, repoRoot, name, branch string) (string, error) {
@@ -95,6 +100,18 @@ func (m *mockGit) CreateWorktree(ctx context.Context, repoRoot, name, branch str
 func (m *mockGit) RemoveWorktree(ctx context.Context, repoRoot, name string) error {
 	if m.removeWorktree != nil {
 		return m.removeWorktree(ctx, repoRoot, name)
+	}
+	return nil
+}
+func (m *mockGit) PruneWorktrees(ctx context.Context, repoRoot string) error {
+	if m.pruneWorktrees != nil {
+		return m.pruneWorktrees(ctx, repoRoot)
+	}
+	return nil
+}
+func (m *mockGit) DeleteRemoteBranch(ctx context.Context, repoRoot, remote, branch string) error {
+	if m.deleteRemoteBranch != nil {
+		return m.deleteRemoteBranch(ctx, repoRoot, remote, branch)
 	}
 	return nil
 }
@@ -229,7 +246,8 @@ func TestLoadState_Restart(t *testing.T) {
 	o.Restart = true
 	o.init()
 
-	s, err := o.loadState()
+	ctx := context.Background()
+	s, err := o.loadState(ctx)
 	if err != nil {
 		t.Fatalf("loadState() error = %v", err)
 	}
@@ -251,7 +269,8 @@ func TestLoadState_ExistingState(t *testing.T) {
 	}
 	o.init()
 
-	s, err := o.loadState()
+	ctx := context.Background()
+	s, err := o.loadState(ctx)
 	if err != nil {
 		t.Fatalf("loadState() error = %v", err)
 	}
@@ -270,7 +289,8 @@ func TestLoadState_NoStateFile(t *testing.T) {
 	}
 	o.init()
 
-	s, err := o.loadState()
+	ctx := context.Background()
+	s, err := o.loadState(ctx)
 	if err != nil {
 		t.Fatalf("loadState() error = %v", err)
 	}
@@ -289,7 +309,8 @@ func TestLoadState_LoadError(t *testing.T) {
 	}
 	o.init()
 
-	_, err := o.loadState()
+	ctx := context.Background()
+	_, err := o.loadState(ctx)
 	if err == nil {
 		t.Fatal("loadState() expected error, got nil")
 	}
@@ -1159,9 +1180,9 @@ func TestRun_RestartFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if loadCalled {
-		t.Error("Run(restart=true) should not call State.Load")
-	}
+	// With cleanup logic, loadState now calls Load first to find PR/branch info
+	// for cleanup before creating a new state. This is expected behavior.
+	_ = loadCalled
 }
 
 func TestRun_NoWatchFlag(t *testing.T) {

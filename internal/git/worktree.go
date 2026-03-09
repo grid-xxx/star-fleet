@@ -32,7 +32,12 @@ func CreateWorktree(ctx context.Context, repoRoot, name, branch string) (string,
 
 func RemoveWorktree(ctx context.Context, repoRoot, name string) error {
 	dir := filepath.Join(repoRoot, "worktrees", name)
-	_, err := runGit(ctx, repoRoot, "worktree", "remove", dir, "--force")
+	_, _ = runGit(ctx, repoRoot, "worktree", "remove", dir, "--force")
+	return os.RemoveAll(dir)
+}
+
+func PruneWorktrees(ctx context.Context, repoRoot string) error {
+	_, err := runGit(ctx, repoRoot, "worktree", "prune")
 	return err
 }
 
@@ -132,6 +137,16 @@ func RepoRoot(ctx context.Context) (string, error) {
 
 func DeleteBranch(ctx context.Context, dir, branch string) error {
 	_, err := runGit(ctx, dir, "branch", "-D", branch)
+	return err
+}
+
+func PushDeleteBranch(ctx context.Context, dir, branch string) error {
+	_, err := runGit(ctx, dir, "push", "origin", "--delete", branch)
+	return err
+}
+
+func DeleteRemoteBranch(ctx context.Context, repoRoot, remote, branch string) error {
+	_, err := runGit(ctx, repoRoot, "push", remote, "--delete", branch)
 	return err
 }
 
