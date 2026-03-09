@@ -195,12 +195,17 @@ func TestLoop_InitialCheckBlockedByActionableComment(t *testing.T) {
 	a := newTestAgent(t)
 	d := ui.New()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
+	ctx := context.Background()
 
 	result, err := Loop(ctx, a, s, cfg, d)
-	if err == nil && result != nil && result.Reason == ExitReadyToMerge {
-		t.Error("should not return ExitReadyToMerge when there are actionable comments")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The initial check blocks because of the actionable comment, but once
+	// the poll loop processes the comment and CI is still green, auto-merge
+	// triggers on the subsequent poll iteration.
+	if result.Reason != ExitReadyToMerge {
+		t.Errorf("Reason = %v, want ExitReadyToMerge (comment processed, CI green)", result.Reason)
 	}
 }
 
@@ -250,6 +255,129 @@ func TestLoop_InitialCheckWithAlreadyProcessedComment(t *testing.T) {
 	}
 	if result.Reason != ExitReadyToMerge {
 		t.Errorf("Reason = %v, want ExitReadyToMerge (comment already processed)", result.Reason)
+	}
+}
+
+func TestLoop_AutoMergeOnCIPassDuringPoll(t *testing.T) {
+	// Simulate CI being in-progress initially, then passing on a subsequent poll.
+	// The watch loop should detect CI green via the fallback CheckCIStatus call
+	// and return ExitReadyToMerge.
+	callCount := 0
+	mock := &ghMock{
+		prState:  `{"state":"OPEN"}`,
+		comments: "",
+		reviews:  "",
+		checks:   `[{"name":"build","state":"IN_PROGRESS","conclusion":""}]`,
+	}
+	restore := gh.SetRunFn(func(ctx context.Context, dir string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "checks") && strings.Contains(joined, "--json") {
+			callCount++
+			// First two calls: initial check + first poll — CI still running.
+			// Third call onwards: CI passed (fallback CheckCIStatus).
+			if callCount >= 3 {
+				return `[{"name":"build","state":"COMPLETED","conclusion":"SUCCESS"}]`, nil
+			}
+			return `[{"name":"build","state":"IN_PROGRESS","conclusion":""}]`, nil
+		}
+		return mock.run(ctx, dir, args...)
+	})
+	t.Cleanup(restore)
+
+	s := newTestState(t)
+	cfg := newTestConfig(true)
+	a := newTestAgent(t)
+	d := ui.New()
+	ctx := context.Background()
+
+	result, err := Loop(ctx, a, s, cfg, d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.Reason != ExitReadyToMerge {
+		t.Errorf("Reason = %v, want ExitReadyToMerge", result.Reason)
+	}
+}
+
+func TestLoop_AutoMergeOnCIPassDuringPoll_EventPath(t *testing.T) {
+	// Test the EventCIPass path within the poll loop: CI passes and PollEvents
+	// returns an EventCIPass event that hasn't been recorded yet.
+	callCount := 0
+	mock := &ghMock{
+		prState:  `{"state":"OPEN"}`,
+		comments: "",
+		reviews:  "",
+	}
+	restore := gh.SetRunFn(func(ctx context.Context, dir string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "checks") && strings.Contains(joined, "--json") {
+			callCount++
+			// First call: initial check — CI in progress, so initial check skips.
+			// Second call: first poll PollEvents — CI now completed.
+			if callCount >= 2 {
+				return `[{"name":"build","state":"COMPLETED","conclusion":"SUCCESS"}]`, nil
+			}
+			return `[{"name":"build","state":"IN_PROGRESS","conclusion":""}]`, nil
+		}
+		return mock.run(ctx, dir, args...)
+	})
+	t.Cleanup(restore)
+
+	s := newTestState(t)
+	cfg := newTestConfig(true)
+	a := newTestAgent(t)
+	d := ui.New()
+	ctx := context.Background()
+
+	result, err := Loop(ctx, a, s, cfg, d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.Reason != ExitReadyToMerge {
+		t.Errorf("Reason = %v, want ExitReadyToMerge", result.Reason)
+	}
+}
+
+func TestLoop_AutoMergeBlockedByActionableDuringPoll(t *testing.T) {
+	// CI passes during poll, but a CI failure also appears in the same batch.
+	// Auto-merge should NOT trigger because there's an actionable CI failure.
+	callCount := 0
+	mock := &ghMock{
+		prState:  `{"state":"OPEN"}`,
+		comments: "",
+		reviews:  "",
+	}
+	restore := gh.SetRunFn(func(ctx context.Context, dir string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "checks") && strings.Contains(joined, "--json") {
+			callCount++
+			// Always return a mix of pass and fail — hasActionable stays true.
+			if callCount >= 2 {
+				return `[{"name":"build","state":"COMPLETED","conclusion":"SUCCESS"},{"name":"lint","state":"COMPLETED","conclusion":"FAILURE"}]`, nil
+			}
+			return `[{"name":"build","state":"IN_PROGRESS","conclusion":""}]`, nil
+		}
+		return mock.run(ctx, dir, args...)
+	})
+	t.Cleanup(restore)
+
+	s := newTestState(t)
+	cfg := newTestConfig(true)
+	a := newTestAgent(t)
+	d := ui.New()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	result, err := Loop(ctx, a, s, cfg, d)
+	if err == nil && result != nil && result.Reason == ExitReadyToMerge {
+		t.Error("should not return ExitReadyToMerge when CI has failures")
 	}
 }
 
