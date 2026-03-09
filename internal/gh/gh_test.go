@@ -114,6 +114,85 @@ func TestCurrentRepoUsesNameWithOwner(t *testing.T) {
 	}
 }
 
+func TestCheckCIStatus(t *testing.T) {
+	tests := []struct {
+		name      string
+		output    string
+		runErr    error
+		wantGreen bool
+		wantTotal int
+		wantErr   bool
+	}{
+		{
+			name:      "all checks green",
+			output:    `[{"name":"build","state":"COMPLETED","conclusion":"SUCCESS"},{"name":"lint","state":"COMPLETED","conclusion":"SUCCESS"}]`,
+			wantGreen: true,
+			wantTotal: 2,
+		},
+		{
+			name:      "one check failed",
+			output:    `[{"name":"build","state":"COMPLETED","conclusion":"SUCCESS"},{"name":"lint","state":"COMPLETED","conclusion":"FAILURE"}]`,
+			wantGreen: false,
+			wantTotal: 2,
+		},
+		{
+			name:      "check still in progress",
+			output:    `[{"name":"build","state":"IN_PROGRESS","conclusion":""},{"name":"lint","state":"COMPLETED","conclusion":"SUCCESS"}]`,
+			wantGreen: false,
+			wantTotal: 2,
+		},
+		{
+			name:      "no checks",
+			output:    `[]`,
+			wantGreen: false,
+			wantTotal: 0,
+		},
+		{
+			name:      "neutral and skipped count as green",
+			output:    `[{"name":"build","state":"COMPLETED","conclusion":"SUCCESS"},{"name":"optional","state":"COMPLETED","conclusion":"NEUTRAL"},{"name":"skip","state":"COMPLETED","conclusion":"SKIPPED"}]`,
+			wantGreen: true,
+			wantTotal: 3,
+		},
+		{
+			name:      "empty output from gh",
+			output:    "",
+			wantGreen: false,
+			wantTotal: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origRunFn := runFn
+			t.Cleanup(func() { runFn = origRunFn })
+
+			runFn = func(_ context.Context, _ string, args ...string) (string, error) {
+				if tt.runErr != nil {
+					return "", tt.runErr
+				}
+				return tt.output, nil
+			}
+
+			status, err := CheckCIStatus(context.Background(), "owner", "repo", 1)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if status.AllGreen != tt.wantGreen {
+				t.Errorf("AllGreen = %v, want %v", status.AllGreen, tt.wantGreen)
+			}
+			if status.Total != tt.wantTotal {
+				t.Errorf("Total = %d, want %d", status.Total, tt.wantTotal)
+			}
+		})
+	}
+}
+
 func TestParsePRURL(t *testing.T) {
 	tests := []struct {
 		url    string
