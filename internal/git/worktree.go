@@ -145,6 +145,14 @@ func PushDeleteBranch(ctx context.Context, dir, branch string) error {
 	return err
 }
 
+func RemoteBranchExists(ctx context.Context, repoRoot, remote, branch string) (bool, error) {
+	out, err := runGit(ctx, repoRoot, "ls-remote", "--heads", remote, branch)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 func DeleteRemoteBranch(ctx context.Context, repoRoot, remote, branch string) error {
 	_, err := runGit(ctx, repoRoot, "push", remote, "--delete", branch)
 	return err

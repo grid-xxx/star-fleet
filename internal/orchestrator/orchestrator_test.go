@@ -84,10 +84,11 @@ func (m *mockGH) SubmitReview(ctx context.Context, owner, repo string, prNumber 
 }
 
 type mockGit struct {
-	createWorktree    func(ctx context.Context, repoRoot, name, branch string) (string, error)
-	removeWorktree    func(ctx context.Context, repoRoot, name string) error
-	push              func(ctx context.Context, dir, remote, branch string) error
-	pruneWorktrees    func(ctx context.Context, repoRoot string) error
+	createWorktree     func(ctx context.Context, repoRoot, name, branch string) (string, error)
+	removeWorktree     func(ctx context.Context, repoRoot, name string) error
+	push               func(ctx context.Context, dir, remote, branch string) error
+	pruneWorktrees     func(ctx context.Context, repoRoot string) error
+	remoteBranchExists func(ctx context.Context, repoRoot, remote, branch string) (bool, error)
 	deleteRemoteBranch func(ctx context.Context, repoRoot, remote, branch string) error
 }
 
@@ -108,6 +109,12 @@ func (m *mockGit) PruneWorktrees(ctx context.Context, repoRoot string) error {
 		return m.pruneWorktrees(ctx, repoRoot)
 	}
 	return nil
+}
+func (m *mockGit) RemoteBranchExists(ctx context.Context, repoRoot, remote, branch string) (bool, error) {
+	if m.remoteBranchExists != nil {
+		return m.remoteBranchExists(ctx, repoRoot, remote, branch)
+	}
+	return false, nil
 }
 func (m *mockGit) DeleteRemoteBranch(ctx context.Context, repoRoot, remote, branch string) error {
 	if m.deleteRemoteBranch != nil {
@@ -309,6 +316,136 @@ func TestLoadState_LoadError(t *testing.T) {
 	_, err := o.loadState()
 	if err == nil {
 		t.Fatal("loadState() expected error, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// nextVersionedBranch tests
+// ---------------------------------------------------------------------------
+
+func TestNextVersionedBranch_NoPriorBranch(t *testing.T) {
+	t.Parallel()
+	o := baseOrchestrator(t)
+
+	s, err := o.loadState()
+	if err != nil {
+		t.Fatalf("loadState() error = %v", err)
+	}
+	if s.Branch != "fleet/1" {
+		t.Errorf("branch = %q, want %q", s.Branch, "fleet/1")
+	}
+}
+
+func TestNextVersionedBranch_BaseExists(t *testing.T) {
+	t.Parallel()
+	o := baseOrchestrator(t)
+	o.Restart = true
+	o.Git = &mockGit{
+		remoteBranchExists: func(ctx context.Context, repoRoot, remote, branch string) (bool, error) {
+			return branch == "fleet/1", nil
+		},
+	}
+	o.init()
+
+	s, err := o.loadState()
+	if err != nil {
+		t.Fatalf("loadState() error = %v", err)
+	}
+	if s.Branch != "fleet/1-v2" {
+		t.Errorf("branch = %q, want %q", s.Branch, "fleet/1-v2")
+	}
+}
+
+func TestNextVersionedBranch_V2Exists(t *testing.T) {
+	t.Parallel()
+	o := baseOrchestrator(t)
+	o.Restart = true
+	existing := map[string]bool{"fleet/1": true, "fleet/1-v2": true}
+	o.Git = &mockGit{
+		remoteBranchExists: func(ctx context.Context, repoRoot, remote, branch string) (bool, error) {
+			return existing[branch], nil
+		},
+	}
+	o.init()
+
+	s, err := o.loadState()
+	if err != nil {
+		t.Fatalf("loadState() error = %v", err)
+	}
+	if s.Branch != "fleet/1-v3" {
+		t.Errorf("branch = %q, want %q", s.Branch, "fleet/1-v3")
+	}
+}
+
+func TestNextVersionedBranch_ManyVersions(t *testing.T) {
+	t.Parallel()
+	o := baseOrchestrator(t)
+	o.Restart = true
+	existing := map[string]bool{
+		"fleet/1":    true,
+		"fleet/1-v2": true,
+		"fleet/1-v3": true,
+		"fleet/1-v4": true,
+	}
+	o.Git = &mockGit{
+		remoteBranchExists: func(ctx context.Context, repoRoot, remote, branch string) (bool, error) {
+			return existing[branch], nil
+		},
+	}
+	o.init()
+
+	s, err := o.loadState()
+	if err != nil {
+		t.Fatalf("loadState() error = %v", err)
+	}
+	if s.Branch != "fleet/1-v5" {
+		t.Errorf("branch = %q, want %q", s.Branch, "fleet/1-v5")
+	}
+}
+
+func TestNextVersionedBranch_RemoteCheckError(t *testing.T) {
+	t.Parallel()
+	o := baseOrchestrator(t)
+	o.Restart = true
+	o.Git = &mockGit{
+		remoteBranchExists: func(ctx context.Context, repoRoot, remote, branch string) (bool, error) {
+			return false, fmt.Errorf("network error")
+		},
+	}
+	o.init()
+
+	s, err := o.loadState()
+	if err != nil {
+		t.Fatalf("loadState() error = %v", err)
+	}
+	// On error, falls back to base branch name
+	if s.Branch != "fleet/1" {
+		t.Errorf("branch = %q, want %q (fallback on error)", s.Branch, "fleet/1")
+	}
+}
+
+func TestRestart_DoesNotDeleteOldBranch(t *testing.T) {
+	t.Parallel()
+	var deletedBranch string
+	o := baseOrchestrator(t)
+	o.Restart = true
+	o.Git = &mockGit{
+		deleteRemoteBranch: func(ctx context.Context, repoRoot, remote, branch string) error {
+			deletedBranch = branch
+			return nil
+		},
+		remoteBranchExists: func(ctx context.Context, repoRoot, remote, branch string) (bool, error) {
+			return branch == "fleet/1", nil
+		},
+	}
+	o.init()
+
+	_, err := o.loadState()
+	if err != nil {
+		t.Fatalf("loadState() error = %v", err)
+	}
+	if deletedBranch != "" {
+		t.Errorf("restart should NOT delete old branch, but deleted %q", deletedBranch)
 	}
 }
 

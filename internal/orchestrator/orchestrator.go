@@ -40,6 +40,7 @@ type GitClient interface {
 	CreateWorktree(ctx context.Context, repoRoot, name, branch string) (string, error)
 	RemoveWorktree(ctx context.Context, repoRoot, name string) error
 	PruneWorktrees(ctx context.Context, repoRoot string) error
+	RemoteBranchExists(ctx context.Context, repoRoot, remote, branch string) (bool, error)
 	DeleteRemoteBranch(ctx context.Context, repoRoot, remote, branch string) error
 	Push(ctx context.Context, dir, remote, branch string) error
 }
@@ -102,6 +103,9 @@ func (defaultGit) RemoveWorktree(ctx context.Context, repoRoot, name string) err
 }
 func (defaultGit) PruneWorktrees(ctx context.Context, repoRoot string) error {
 	return git.PruneWorktrees(ctx, repoRoot)
+}
+func (defaultGit) RemoteBranchExists(ctx context.Context, repoRoot, remote, branch string) (bool, error) {
+	return git.RemoteBranchExists(ctx, repoRoot, remote, branch)
 }
 func (defaultGit) DeleteRemoteBranch(ctx context.Context, repoRoot, remote, branch string) error {
 	return git.DeleteRemoteBranch(ctx, repoRoot, remote, branch)
@@ -325,7 +329,13 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 func (o *Orchestrator) loadState() (*state.RunState, error) {
 	if o.Restart {
 		o.restartCleanup()
-		return o.State.New(o.RepoRoot, o.Owner, o.Repo, o.Number), nil
+		s := o.State.New(o.RepoRoot, o.Owner, o.Repo, o.Number)
+		branch, err := o.nextVersionedBranch(context.Background(), s.Branch)
+		if err != nil {
+			return nil, fmt.Errorf("determining versioned branch: %w", err)
+		}
+		s.Branch = branch
+		return s, nil
 	}
 	s, err := o.State.Load(o.RepoRoot, o.Number)
 	if err != nil {
@@ -337,9 +347,33 @@ func (o *Orchestrator) loadState() (*state.RunState, error) {
 	return o.State.New(o.RepoRoot, o.Owner, o.Repo, o.Number), nil
 }
 
+// nextVersionedBranch returns the next available branch name.
+// If fleet/<N> doesn't exist on the remote, it returns fleet/<N> unchanged.
+// If fleet/<N> exists, it probes fleet/<N>-v2, fleet/<N>-v3, ... and returns
+// the first name that doesn't exist, preserving previous branches for reference.
+func (o *Orchestrator) nextVersionedBranch(ctx context.Context, baseBranch string) (string, error) {
+	exists, err := o.Git.RemoteBranchExists(ctx, o.RepoRoot, "origin", baseBranch)
+	if err != nil {
+		return baseBranch, nil
+	}
+	if !exists {
+		return baseBranch, nil
+	}
+
+	for v := 2; ; v++ {
+		candidate := fmt.Sprintf("%s-v%d", baseBranch, v)
+		exists, err := o.Git.RemoteBranchExists(ctx, o.RepoRoot, "origin", candidate)
+		if err != nil {
+			return candidate, nil
+		}
+		if !exists {
+			return candidate, nil
+		}
+	}
+}
+
 func (o *Orchestrator) restartCleanup() {
 	ctx := context.Background()
-	branch := fmt.Sprintf("fleet/%d", o.Number)
 
 	old, err := o.State.Load(o.RepoRoot, o.Number)
 	if err != nil {
@@ -351,10 +385,6 @@ func (o *Orchestrator) restartCleanup() {
 	}
 	if err := o.Git.PruneWorktrees(ctx, o.RepoRoot); err != nil {
 		o.Display.Warn(fmt.Sprintf("restart: pruning worktrees: %v", err))
-	}
-
-	if err := o.Git.DeleteRemoteBranch(ctx, o.RepoRoot, "origin", branch); err != nil {
-		o.Display.Warn(fmt.Sprintf("restart: deleting remote branch %s: %v", branch, err))
 	}
 
 	if old != nil && old.PR != nil {

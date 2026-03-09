@@ -105,6 +105,26 @@ func TestGitignoreCreated(t *testing.T) {
 	}
 }
 
+func TestBranchFieldPersisted(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir, "owner", "repo", 42)
+	s.Branch = "fleet/42-v3"
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := Load(dir, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded == nil {
+		t.Fatal("Load returned nil")
+	}
+	if loaded.Branch != "fleet/42-v3" {
+		t.Errorf("loaded branch = %q, want %q", loaded.Branch, "fleet/42-v3")
+	}
+}
+
 func TestAdvancePersists(t *testing.T) {
 	dir := t.TempDir()
 	s := New(dir, "o", "r", 7)
