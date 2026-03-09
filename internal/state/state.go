@@ -18,9 +18,10 @@ const (
 	PhaseNew       Phase = ""          // not started
 	PhaseIntake    Phase = "intake"    // issue fetched + validated
 	PhaseImplement Phase = "implement" // agent completed implementation + tests
-	PhasePR        Phase = "pr"       // branch pushed, PR created
-	PhaseWatch     Phase = "watch"    // watching PR for feedback
-	PhaseDone      Phase = "done"     // PR merged/closed, pipeline complete
+	PhasePR        Phase = "pr"        // branch pushed, PR created
+	PhaseReview    Phase = "review"    // code review completed
+	PhaseWatch     Phase = "watch"     // watching PR for feedback
+	PhaseDone      Phase = "done"      // PR merged/closed, pipeline complete
 )
 
 var phaseOrder = map[Phase]int{
@@ -28,8 +29,9 @@ var phaseOrder = map[Phase]int{
 	PhaseIntake:    1,
 	PhaseImplement: 2,
 	PhasePR:        3,
-	PhaseWatch:     4,
-	PhaseDone:      5,
+	PhaseReview:    4,
+	PhaseWatch:     5,
+	PhaseDone:      6,
 }
 
 func (p Phase) String() string {
@@ -66,6 +68,8 @@ type RunState struct {
 	AgentDone bool `json:"agent_done"`
 
 	PR *PRInfo `json:"pr,omitempty"`
+
+	ReviewRound int `json:"review_round,omitempty"`
 
 	// Watch loop state
 	ProcessedEvents []string   `json:"processed_events,omitempty"`

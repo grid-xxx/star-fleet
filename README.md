@@ -51,6 +51,8 @@ fleet run https://github.com/org/repo/issues/42
 fleet run org/repo#42 --auto-merge       # auto-merge when CI green
 fleet run org/repo#42 --restart          # discard state, start fresh
 fleet run org/repo#42 --no-watch         # skip watch loop
+fleet run org/repo#42 --no-review        # skip code review phase
+fleet run org/repo#42 --review-only      # only run review on existing PR
 ```
 
 Run `fleet` from inside the target repository. The pipeline automatically saves progress; re-running the same command resumes from the last completed phase.
@@ -70,6 +72,10 @@ Code Agent implements feature + writes tests
     ▼
 Push branch → Create PR
     ▼
+Code Review (review agent checks diff)
+    ├─ Issues found → Agent fixes → re-review (up to max_rounds)
+    └─ No issues → approve
+    ▼
 Watch loop (monitor CI + review comments)
     ├─ Review comment → Agent fixes → push
     ├─ CI green + --auto-merge → squash-merge PR
@@ -84,6 +90,12 @@ Create `.fleet/config.toml` in the repo root:
 ```toml
 [agent]
 backend = "claude-code"  # "claude-code" | "cursor"
+
+[review]
+enabled = true           # enable/disable code review phase
+max_rounds = 3           # max review-fix cycles before proceeding
+backend = ""             # review agent backend (defaults to agent.backend)
+prompt_file = ""         # optional custom review prompt (.md file)
 
 [watch]
 auto_merge = false       # auto-merge when CI passes
@@ -109,6 +121,15 @@ chat_id = ""             # or env FLEET_TELEGRAM_CHAT_ID
 | Key | Default | Description |
 |---|---|---|
 | `backend` | `"claude-code"` | Which code agent CLI to invoke (`"claude-code"` or `"cursor"`) |
+
+### `[review]`
+
+| Key | Default | Description |
+|---|---|---|
+| `enabled` | `true` | Enable the built-in code review phase |
+| `max_rounds` | `3` | Max review-fix cycles before proceeding anyway |
+| `backend` | `""` (uses `agent.backend`) | Which agent backend to use for review |
+| `prompt_file` | `""` | Path to a custom review prompt (`.md` file) |
 
 ### `[watch]`
 
@@ -147,6 +168,10 @@ chat_id = ""             # or env FLEET_TELEGRAM_CHAT_ID
 | Intake | "Picked up" comment on Issue |
 | Spec gap | Gap comment on Issue, pipeline halted |
 | PR created | PR opened with description |
+| Review started | Comment: "Reviewing PR..." |
+| Review issues found | REQUEST_CHANGES review with inline comments |
+| Review passed | APPROVE review: "Code review passed" |
+| Review fix cycle | Comment: "Addressing review feedback (round N/M)..." |
 | Watch | Agent responds to review comments |
 | Done | PR merged (manually or auto-merge) |
 
@@ -166,6 +191,7 @@ star-fleet/
 │   ├── notify/                   # Telegram notifications
 │   ├── orchestrator/             # main pipeline controller
 │   ├── retry/                    # exponential backoff helper
+│   ├── review/                   # built-in code review before merge
 │   ├── state/                    # run state persistence (.fleet/runs/)
 │   ├── ui/                       # terminal display (spinners, live view)
 │   └── watch/                    # PR watch loop (CI, comments, auto-merge)

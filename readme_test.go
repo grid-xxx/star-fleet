@@ -75,7 +75,6 @@ func TestReadmeSingleAgentArchitecture(t *testing.T) {
 			"Two agents run in parallel",
 			"Dev writes implementation, Test writes tests",
 			"cross-validat",
-			"internal/review/",
 			"internal/validate/",
 			"worktrees/dev",
 			"worktrees/test",
@@ -107,6 +106,7 @@ func TestReadmeFlowDiagram(t *testing.T) {
 		"Code Agent implements feature + writes tests",
 		"Push branch",
 		"Create PR",
+		"Code Review",
 		"Watch loop",
 	}
 	for _, step := range steps {
@@ -132,6 +132,7 @@ func TestReadmeDirectoryStructure(t *testing.T) {
 		"notify/",
 		"orchestrator/",
 		"retry/",
+		"review/",
 		"state/",
 		"ui/",
 		"watch/",
@@ -156,6 +157,7 @@ func TestReadmeConfigOptions(t *testing.T) {
 
 	sections := []string{
 		"[agent]",
+		"[review]",
 		"[watch]",
 		"[ci]",
 		"[test]",
@@ -169,6 +171,7 @@ func TestReadmeConfigOptions(t *testing.T) {
 
 	keys := []string{
 		"backend",
+		"max_rounds",
 		"auto_merge",
 		"poll_interval",
 		"idle_timeout",
@@ -195,6 +198,8 @@ func TestReadmeCLIUsage(t *testing.T) {
 		"--auto-merge",
 		"--restart",
 		"--no-watch",
+		"--no-review",
+		"--review-only",
 	}
 	for _, flag := range flags {
 		if !strings.Contains(content, flag) {
@@ -214,6 +219,8 @@ func TestReadmeGitHubTrail(t *testing.T) {
 		"Intake",
 		"Spec gap",
 		"PR created",
+		"Review started",
+		"Review passed",
 		"Watch",
 		"Done",
 	}

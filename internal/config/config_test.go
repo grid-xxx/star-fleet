@@ -133,6 +133,88 @@ required_checks = ["build", "test", "lint"]
 	}
 }
 
+func TestReviewDefaults(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Review.Enabled {
+		t.Error("review.enabled should default to true")
+	}
+	if cfg.Review.MaxRounds != 3 {
+		t.Errorf("review.max_rounds = %d, want 3", cfg.Review.MaxRounds)
+	}
+	if cfg.Review.Backend != "" {
+		t.Errorf("review.backend should default to empty, got %q", cfg.Review.Backend)
+	}
+	if cfg.Review.PromptFile != "" {
+		t.Errorf("review.prompt_file should default to empty, got %q", cfg.Review.PromptFile)
+	}
+}
+
+func TestLoadReviewConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgDir := filepath.Join(dir, ".fleet")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	data := `[agent]
+backend = "claude-code"
+
+[review]
+enabled = false
+max_rounds = 5
+backend = "cursor"
+prompt_file = "review.md"
+`
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Review.Enabled {
+		t.Error("review.enabled should be false")
+	}
+	if cfg.Review.MaxRounds != 5 {
+		t.Errorf("review.max_rounds = %d, want 5", cfg.Review.MaxRounds)
+	}
+	if cfg.Review.Backend != "cursor" {
+		t.Errorf("review.backend = %q, want %q", cfg.Review.Backend, "cursor")
+	}
+	if cfg.Review.PromptFile != "review.md" {
+		t.Errorf("review.prompt_file = %q, want %q", cfg.Review.PromptFile, "review.md")
+	}
+}
+
+func TestLoadReviewInvalidBackend(t *testing.T) {
+	dir := t.TempDir()
+	cfgDir := filepath.Join(dir, ".fleet")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	data := `[agent]
+backend = "claude-code"
+
+[review]
+backend = "gpt-4"
+`
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(dir)
+	if err == nil {
+		t.Fatal("expected error for unsupported review backend")
+	}
+}
+
 func TestAutoMergeDefault(t *testing.T) {
 	dir := t.TempDir()
 	cfg, err := Load(dir)

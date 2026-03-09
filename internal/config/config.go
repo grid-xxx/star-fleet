@@ -11,6 +11,7 @@ import (
 
 type Config struct {
 	Agent    AgentConfig    `toml:"agent"`
+	Review   ReviewConfig   `toml:"review"`
 	Watch    WatchConfig    `toml:"watch"`
 	CI       CIConfig       `toml:"ci"`
 	Test     TestConfig     `toml:"test"`
@@ -38,6 +39,13 @@ type TestConfig struct {
 	Command string `toml:"command"`
 }
 
+type ReviewConfig struct {
+	Enabled    bool   `toml:"enabled"`
+	MaxRounds  int    `toml:"max_rounds"`
+	Backend    string `toml:"backend"`
+	PromptFile string `toml:"prompt_file"`
+}
+
 type TelegramConfig struct {
 	BotToken string `toml:"bot_token"`
 	ChatID   string `toml:"chat_id"`
@@ -61,6 +69,10 @@ func (d Duration) MarshalText() ([]byte, error) {
 func defaults() Config {
 	return Config{
 		Agent: AgentConfig{Backend: "claude-code"},
+		Review: ReviewConfig{
+			Enabled:   true,
+			MaxRounds: 3,
+		},
 		Watch: WatchConfig{
 			PollInterval: Duration{30 * time.Second},
 			Timeout:      Duration{2 * time.Hour},
@@ -100,6 +112,18 @@ func Load(repoRoot string) (*Config, error) {
 	case "claude-code", "cursor", "mock":
 	default:
 		return nil, fmt.Errorf("unsupported agent backend %q (want \"claude-code\", \"cursor\", or \"mock\")", cfg.Agent.Backend)
+	}
+
+	if cfg.Review.Backend != "" {
+		switch cfg.Review.Backend {
+		case "claude-code", "cursor", "mock":
+		default:
+			return nil, fmt.Errorf("unsupported review backend %q (want \"claude-code\", \"cursor\", or \"mock\")", cfg.Review.Backend)
+		}
+	}
+
+	if cfg.Review.MaxRounds < 1 {
+		cfg.Review.MaxRounds = 3
 	}
 
 	return &cfg, nil
