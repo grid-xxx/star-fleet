@@ -31,42 +31,34 @@ type ReviewResult struct {
 
 // Review fetches the PR diff, sends it to the review agent, and posts the review.
 // Returns the number of issues found.
-func (r *Reviewer) Review(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+func (r *Reviewer) Review(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (string, int, error) {
 	diff, err := r.GH.GetPRDiff(ctx, owner, repo, prNumber)
 	if err != nil {
-		return 0, fmt.Errorf("fetching PR diff: %w", err)
+		return "", 0, fmt.Errorf("fetching PR diff: %w", err)
 	}
 
 	if strings.TrimSpace(diff) == "" {
-		return 0, nil
+		return "", 0, nil
 	}
 
 	prompt := buildReviewPrompt(diff, cfg)
 
 	response, err := agent.RunForReview(ctx, r.Agent, "", prompt)
 	if err != nil {
-		return 0, fmt.Errorf("running review agent: %w", err)
+		return "", 0, fmt.Errorf("running review agent: %w", err)
 	}
 
 	response = strings.TrimSpace(response)
 
 	if isApproval(response) {
-		if err := r.GH.SubmitReview(ctx, owner, repo, prNumber, "APPROVE",
-			"✅ Star Fleet — Code review passed"); err != nil {
-			return 0, fmt.Errorf("submitting approval: %w", err)
-		}
-		return 0, nil
-	}
-
-	if err := r.GH.SubmitReview(ctx, owner, repo, prNumber, "REQUEST_CHANGES", response); err != nil {
-		return 0, fmt.Errorf("submitting review: %w", err)
+		return response, 0, nil
 	}
 
 	issues := countIssues(response)
 	if issues == 0 {
 		issues = 1
 	}
-	return issues, nil
+	return response, issues, nil
 }
 
 // IsApproved checks if the latest review from fleet is an approval.
