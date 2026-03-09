@@ -133,6 +133,71 @@ required_checks = ["build", "test", "lint"]
 	}
 }
 
+func TestAutoMergeDefault(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Watch.AutoMerge {
+		t.Error("watch.auto_merge should default to false")
+	}
+}
+
+func TestLoadAutoMergeConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgDir := filepath.Join(dir, ".fleet")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	data := `[agent]
+backend = "claude-code"
+
+[watch]
+auto_merge = true
+`
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !cfg.Watch.AutoMerge {
+		t.Error("watch.auto_merge should be true")
+	}
+}
+
+func TestLoadAutoMergeFalse(t *testing.T) {
+	dir := t.TempDir()
+	cfgDir := filepath.Join(dir, ".fleet")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	data := `[agent]
+backend = "claude-code"
+
+[watch]
+auto_merge = false
+`
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Watch.AutoMerge {
+		t.Error("watch.auto_merge should be false")
+	}
+}
+
 func TestLoadPartialWatchConfig(t *testing.T) {
 	dir := t.TempDir()
 	cfgDir := filepath.Join(dir, ".fleet")

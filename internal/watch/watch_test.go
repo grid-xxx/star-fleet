@@ -14,6 +14,7 @@ func TestExitReasonString(t *testing.T) {
 		{ExitTimeout, "timeout"},
 		{ExitIdle, "idle timeout"},
 		{ExitMaxFix, "max fix rounds"},
+		{ExitReadyToMerge, "ready to merge"},
 		{ExitReason(99), "unknown"},
 	}
 	for _, tt := range tests {

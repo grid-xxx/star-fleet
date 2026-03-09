@@ -26,6 +26,7 @@ type mockGH struct {
 	defaultBranch func(ctx context.Context, owner, repo string) (string, error)
 	findPR        func(ctx context.Context, owner, repo, head string) (*gh.PR, error)
 	createPR      func(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*gh.PR, error)
+	mergePR       func(ctx context.Context, owner, repo string, number int) error
 }
 
 func (m *mockGH) FetchIssue(ctx context.Context, owner, repo string, number int) (*gh.Issue, error) {
@@ -57,6 +58,12 @@ func (m *mockGH) CreatePR(ctx context.Context, owner, repo, workdir, title, body
 		return m.createPR(ctx, owner, repo, workdir, title, body, base, head)
 	}
 	return &gh.PR{Number: 42, URL: "https://github.com/test/repo/pull/42"}, nil
+}
+func (m *mockGH) MergePR(ctx context.Context, owner, repo string, number int) error {
+	if m.mergePR != nil {
+		return m.mergePR(ctx, owner, repo, number)
+	}
+	return nil
 }
 
 type mockGit struct {
@@ -810,6 +817,7 @@ func TestPhaseWatch_ExitReasons(t *testing.T) {
 		{"timeout", watch.ExitTimeout},
 		{"idle", watch.ExitIdle},
 		{"max-fix", watch.ExitMaxFix},
+		{"ready-to-merge", watch.ExitReadyToMerge},
 	}
 
 	for _, tt := range tests {
@@ -876,6 +884,107 @@ func TestPhaseWatch_AdvancesToWatch(t *testing.T) {
 	}
 	if s.Phase != state.PhaseDone {
 		t.Errorf("state phase = %v, want %v", s.Phase, state.PhaseDone)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// phaseWatch auto-merge tests
+// ---------------------------------------------------------------------------
+
+func TestPhaseWatch_ReadyToMerge_CallsMergePR(t *testing.T) {
+	t.Parallel()
+	var mergedOwner, mergedRepo string
+	var mergedNumber int
+
+	o := baseOrchestrator(t)
+	o.AutoMerge = true
+	o.Watch = &mockWatch{
+		loop: func(ctx context.Context, codeAgent *agent.CodeAgent, s *state.RunState, cfg *config.Config, display *ui.Display) (*watch.Result, error) {
+			return &watch.Result{Reason: watch.ExitReadyToMerge}, nil
+		},
+	}
+	o.GH = &mockGH{
+		mergePR: func(ctx context.Context, owner, repo string, number int) error {
+			mergedOwner = owner
+			mergedRepo = repo
+			mergedNumber = number
+			return nil
+		},
+	}
+
+	s := state.New(t.TempDir(), "owner", "repo", 1)
+	s.Phase = state.PhasePR
+	pr := &gh.PR{Number: 42, URL: "https://github.com/test/repo/pull/42"}
+
+	err := o.phaseWatch(context.Background(), s, testCodeAgent(), pr)
+	if err != nil {
+		t.Fatalf("phaseWatch() error = %v", err)
+	}
+	if mergedOwner != "owner" {
+		t.Errorf("MergePR owner = %q, want %q", mergedOwner, "owner")
+	}
+	if mergedRepo != "repo" {
+		t.Errorf("MergePR repo = %q, want %q", mergedRepo, "repo")
+	}
+	if mergedNumber != 42 {
+		t.Errorf("MergePR number = %d, want 42", mergedNumber)
+	}
+	if s.Phase != state.PhaseDone {
+		t.Errorf("state phase = %v, want %v", s.Phase, state.PhaseDone)
+	}
+}
+
+func TestPhaseWatch_ReadyToMerge_MergeError(t *testing.T) {
+	t.Parallel()
+	o := baseOrchestrator(t)
+	o.AutoMerge = true
+	o.Watch = &mockWatch{
+		loop: func(ctx context.Context, codeAgent *agent.CodeAgent, s *state.RunState, cfg *config.Config, display *ui.Display) (*watch.Result, error) {
+			return &watch.Result{Reason: watch.ExitReadyToMerge}, nil
+		},
+	}
+	o.GH = &mockGH{
+		mergePR: func(ctx context.Context, owner, repo string, number int) error {
+			return errors.New("merge conflict")
+		},
+	}
+
+	s := state.New(t.TempDir(), "owner", "repo", 1)
+	s.Phase = state.PhasePR
+	pr := &gh.PR{Number: 42, URL: "https://github.com/test/repo/pull/42"}
+
+	err := o.phaseWatch(context.Background(), s, testCodeAgent(), pr)
+	if err == nil {
+		t.Fatal("phaseWatch() expected merge error, got nil")
+	}
+	if !strings.Contains(err.Error(), "auto-merge") {
+		t.Errorf("expected 'auto-merge' in error, got %v", err)
+	}
+}
+
+func TestPhaseWatch_AutoMergeConfig_PropagatedToWatch(t *testing.T) {
+	t.Parallel()
+	var capturedAutoMerge bool
+
+	o := baseOrchestrator(t)
+	o.AutoMerge = true
+	o.Watch = &mockWatch{
+		loop: func(ctx context.Context, codeAgent *agent.CodeAgent, s *state.RunState, cfg *config.Config, display *ui.Display) (*watch.Result, error) {
+			capturedAutoMerge = cfg.Watch.AutoMerge
+			return &watch.Result{Reason: watch.ExitMerged}, nil
+		},
+	}
+
+	s := state.New(t.TempDir(), "owner", "repo", 1)
+	s.Phase = state.PhasePR
+	pr := &gh.PR{Number: 42, URL: "https://github.com/test/repo/pull/42"}
+
+	err := o.phaseWatch(context.Background(), s, testCodeAgent(), pr)
+	if err != nil {
+		t.Fatalf("phaseWatch() error = %v", err)
+	}
+	if !capturedAutoMerge {
+		t.Error("AutoMerge should be propagated to watch config")
 	}
 }
 
@@ -1023,6 +1132,36 @@ func TestRun_NoWatchFlag(t *testing.T) {
 	}
 	if watchCalled {
 		t.Error("Run(noWatch=true) should not call Watch.Loop")
+	}
+}
+
+func TestRun_AutoMerge_FullPipeline(t *testing.T) {
+	t.Parallel()
+	var merged bool
+
+	o := baseOrchestrator(t)
+	o.AutoMerge = true
+	o.Watch = &mockWatch{
+		loop: func(ctx context.Context, codeAgent *agent.CodeAgent, s *state.RunState, cfg *config.Config, display *ui.Display) (*watch.Result, error) {
+			if !cfg.Watch.AutoMerge {
+				t.Error("auto_merge config not propagated to watch loop")
+			}
+			return &watch.Result{Reason: watch.ExitReadyToMerge}, nil
+		},
+	}
+	o.GH = &mockGH{
+		mergePR: func(ctx context.Context, owner, repo string, number int) error {
+			merged = true
+			return nil
+		},
+	}
+
+	err := o.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !merged {
+		t.Error("Run(autoMerge=true) should call MergePR")
 	}
 }
 

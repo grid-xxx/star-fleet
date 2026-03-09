@@ -25,6 +25,7 @@ type WatchConfig struct {
 	Timeout      Duration `toml:"timeout"`
 	IdleTimeout  Duration `toml:"idle_timeout"`
 	MaxFixRounds int      `toml:"max_fix_rounds"`
+	AutoMerge    bool     `toml:"auto_merge"`
 }
 
 type CIConfig struct {
