@@ -208,7 +208,7 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		}
 	}()
 
-	s, err := o.loadState(ctx)
+	s, err := o.loadState()
 	if err != nil {
 		return err
 	}
@@ -229,6 +229,12 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 	}
 
 	o.Display.Title(o.Owner, o.Repo, o.Number)
+
+	// Display resolved config
+	for _, line := range strings.Split(o.Config.Summary(), "\n") {
+		o.Display.Info("  " + line)
+	}
+
 	if resuming {
 		o.Display.Info(fmt.Sprintf("⟳ Resuming from %s phase", s.Phase))
 	}
@@ -245,6 +251,7 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		o.Display.StepFail("Creating worktree...", err.Error())
 		return fmt.Errorf("creating worktree: %w", err)
 	}
+	o.Display.Info(fmt.Sprintf("Branch: %s → worktrees/impl", s.Branch))
 	defer o.cleanup(ctx)
 
 	backend, err := o.Backend.NewBackend(o.Config.Agent.Backend)

@@ -246,8 +246,7 @@ func TestLoadState_Restart(t *testing.T) {
 	o.Restart = true
 	o.init()
 
-	ctx := context.Background()
-	s, err := o.loadState(ctx)
+	s, err := o.loadState()
 	if err != nil {
 		t.Fatalf("loadState() error = %v", err)
 	}
@@ -269,8 +268,7 @@ func TestLoadState_ExistingState(t *testing.T) {
 	}
 	o.init()
 
-	ctx := context.Background()
-	s, err := o.loadState(ctx)
+	s, err := o.loadState()
 	if err != nil {
 		t.Fatalf("loadState() error = %v", err)
 	}
@@ -289,8 +287,7 @@ func TestLoadState_NoStateFile(t *testing.T) {
 	}
 	o.init()
 
-	ctx := context.Background()
-	s, err := o.loadState(ctx)
+	s, err := o.loadState()
 	if err != nil {
 		t.Fatalf("loadState() error = %v", err)
 	}
@@ -309,8 +306,7 @@ func TestLoadState_LoadError(t *testing.T) {
 	}
 	o.init()
 
-	ctx := context.Background()
-	_, err := o.loadState(ctx)
+	_, err := o.loadState()
 	if err == nil {
 		t.Fatal("loadState() expected error, got nil")
 	}
