@@ -32,6 +32,7 @@ type GHClient interface {
 // ReviewRunner abstracts the review process for testing.
 type ReviewRunner interface {
 	Review(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error)
+	ReviewLocal(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (*review.ReviewResult, error)
 }
 
 // GitClient abstracts git operations for testing.
@@ -121,17 +122,32 @@ type defaultReview struct {
 	backend BackendFactory
 }
 
-func (d defaultReview) Review(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+func (d defaultReview) newReviewer(cfg *config.ReviewConfig) (*review.Reviewer, error) {
 	backendName := cfg.Backend
 	if backendName == "" {
 		backendName = "claude-code"
 	}
 	b, err := d.backend.NewBackend(backendName)
 	if err != nil {
+		return nil, err
+	}
+	return &review.Reviewer{Agent: b, GH: d.gh}, nil
+}
+
+func (d defaultReview) Review(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+	r, err := d.newReviewer(cfg)
+	if err != nil {
 		return 0, err
 	}
-	r := &review.Reviewer{Agent: b, GH: d.gh}
 	return r.Review(ctx, owner, repo, prNumber, cfg)
+}
+
+func (d defaultReview) ReviewLocal(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (*review.ReviewResult, error) {
+	r, err := d.newReviewer(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return r.ReviewLocal(ctx, owner, repo, prNumber, cfg)
 }
 
 type defaultBackendFactory struct{}
@@ -497,37 +513,39 @@ func (o *Orchestrator) phaseReview(ctx context.Context, s *state.RunState, codeA
 		maxRounds = 3
 	}
 
-	_ = o.GH.PostComment(ctx, o.Owner, o.Repo, pr.Number,
-		"🔍 Star Fleet — Reviewing PR...")
+	displayName := o.Config.Review.Name
+	if displayName == "" {
+		displayName = "Code Review"
+	}
 
 	for round := s.ReviewRound + 1; round <= maxRounds; round++ {
-		o.Display.Step("Code Review", fmt.Sprintf("round %d/%d...", round, maxRounds))
+		o.Display.Step(displayName, fmt.Sprintf("round %d/%d...", round, maxRounds))
 
-		issues, err := o.Reviewer.Review(ctx, o.Owner, o.Repo, pr.Number, &o.Config.Review)
+		result, err := o.Reviewer.ReviewLocal(ctx, o.Owner, o.Repo, pr.Number, &o.Config.Review)
 		if err != nil {
-			o.Display.StepFail("Code Review", err.Error())
+			o.Display.StepFail(displayName, err.Error())
 			return fmt.Errorf("review round %d: %w", round, err)
 		}
 
 		s.ReviewRound = round
 		_ = s.Save()
 
-		if issues == 0 {
-			o.Display.Step("Code Review", "approved")
+		if result.Approved {
+			o.Display.Step(displayName, "approved")
 			return s.Advance(state.PhaseReview)
 		}
 
-		o.Display.Step("Code Review", fmt.Sprintf("round %d: %d issue(s) found", round, issues))
+		o.Display.Step(displayName, fmt.Sprintf("round %d: %d issue(s) found", round, result.Issues))
 
 		if round == maxRounds {
-			o.Display.Warn(fmt.Sprintf("Code Review: max rounds (%d) reached, proceeding", maxRounds))
+			o.Display.Warn(fmt.Sprintf("%s: max rounds (%d) reached, proceeding", displayName, maxRounds))
 			break
 		}
 
-		_ = o.GH.PostComment(ctx, o.Owner, o.Repo, pr.Number,
-			fmt.Sprintf("🔧 Addressing review feedback (round %d/%d)...", round, maxRounds))
-
-		if err := codeAgent.Fix(ctx, fmt.Sprintf("Address the code review feedback from round %d. Check the PR review comments for details.", round)); err != nil {
+		// Feed review feedback directly to coding agent (no GitHub roundtrip)
+		feedback := fmt.Sprintf("The local code review (round %d/%d) found the following issues. Fix all of them:\n\n%s",
+			round, maxRounds, result.Feedback)
+		if err := codeAgent.Fix(ctx, feedback); err != nil {
 			return fmt.Errorf("fixing review issues (round %d): %w", round, err)
 		}
 

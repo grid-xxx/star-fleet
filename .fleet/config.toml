@@ -1,6 +1,12 @@
 [agent]
 backend = "cursor"  # "claude-code" | "cursor"
 
+[review]
+enabled = true              # local review loop
+backend = "cursor"          # review agent backend
+max_rounds = 3              # max local review-fix cycles
+name = "Code Review"        # display name in logs
+
 [watch]
 poll_interval = "30s"   # how often to check for new events
 timeout = "2h"          # max total watch time

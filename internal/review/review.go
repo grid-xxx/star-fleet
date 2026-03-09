@@ -26,10 +26,13 @@ type Reviewer struct {
 	GH    GHReview
 }
 
-// ReviewResult contains the outcome of a single review pass.
+// ReviewResult contains the outcome of a local review pass. The feedback
+// field carries the full agent response so the orchestrator can feed it
+// directly to the coding agent without a GitHub API roundtrip.
 type ReviewResult struct {
 	Approved bool
-	Comments string
+	Feedback string
+	Issues   int
 }
 
 // structuredReview is the JSON format the review agent is asked to produce.
@@ -45,8 +48,70 @@ type reviewComment struct {
 	Body string `json:"body"`
 }
 
-// Review fetches the PR diff, sends it to the review agent, and posts the review.
-// Returns the number of issues found.
+// ReviewLocal fetches the PR diff, sends it to the review agent, and returns
+// the result without submitting anything to GitHub. This enables fast local
+// review-fix cycles where the orchestrator feeds feedback directly to the
+// coding agent.
+func (r *Reviewer) ReviewLocal(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (*ReviewResult, error) {
+	diff, err := r.GH.GetPRDiff(ctx, owner, repo, prNumber)
+	if err != nil {
+		return nil, fmt.Errorf("fetching PR diff: %w", err)
+	}
+
+	if strings.TrimSpace(diff) == "" {
+		return &ReviewResult{Approved: true}, nil
+	}
+
+	prompt := buildReviewPrompt(diff, cfg)
+	response, err := agent.RunForReview(ctx, r.Agent, "", prompt)
+	if err != nil {
+		return nil, fmt.Errorf("running review agent: %w", err)
+	}
+
+	response = strings.TrimSpace(response)
+	return parseReviewResponse(response), nil
+}
+
+// parseReviewResponse converts raw agent output into a ReviewResult.
+func parseReviewResponse(response string) *ReviewResult {
+	if sr, ok := parseStructuredReview(response); ok {
+		verdict := strings.ToLower(sr.Verdict)
+		approved := verdict == "approve" || verdict == "approved" || verdict == "lgtm"
+		issues := len(sr.Comments)
+		feedback := formatLocalFeedback(sr)
+		if approved {
+			return &ReviewResult{Approved: true, Feedback: feedback}
+		}
+		if issues == 0 {
+			issues = 1
+		}
+		return &ReviewResult{Approved: false, Feedback: feedback, Issues: issues}
+	}
+
+	if isApproval(response) {
+		return &ReviewResult{Approved: true, Feedback: response}
+	}
+
+	issues := countIssues(response)
+	if issues == 0 {
+		issues = 1
+	}
+	return &ReviewResult{Approved: false, Feedback: response, Issues: issues}
+}
+
+// formatLocalFeedback builds a human-readable feedback string from a
+// structured review so the coding agent receives actionable instructions.
+func formatLocalFeedback(sr *structuredReview) string {
+	var b strings.Builder
+	b.WriteString(sr.Summary)
+	for i, c := range sr.Comments {
+		fmt.Fprintf(&b, "\n\n%d. %s:%d — %s", i+1, c.Path, c.Line, c.Body)
+	}
+	return b.String()
+}
+
+// Review fetches the PR diff, sends it to the review agent, and posts the
+// review to GitHub as a PR Review. Returns the number of issues found.
 func (r *Reviewer) Review(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
 	diff, err := r.GH.GetPRDiff(ctx, owner, repo, prNumber)
 	if err != nil {
@@ -79,7 +144,7 @@ func (r *Reviewer) Review(ctx context.Context, owner, repo string, prNumber int,
 	// Fall back to legacy plain-text handling
 	if isApproval(response) {
 		body := formatReviewBody(displayName, "approved", "No issues found.", 0)
-		if err := r.GH.SubmitReview(ctx, owner, repo, prNumber, "APPROVE", body); err != nil {
+		if err := r.submitWithFallback(ctx, owner, repo, prNumber, "APPROVE", body, nil); err != nil {
 			return 0, fmt.Errorf("submitting approval: %w", err)
 		}
 		return 0, nil
@@ -117,7 +182,7 @@ func (r *Reviewer) submitStructured(ctx context.Context, owner, repo string, prN
 		})
 	}
 
-	if err := r.GH.SubmitPRReview(ctx, owner, repo, prNumber, event, body, inlineComments); err != nil {
+	if err := r.submitWithFallback(ctx, owner, repo, prNumber, event, body, inlineComments); err != nil {
 		return 0, fmt.Errorf("submitting review: %w", err)
 	}
 
@@ -130,6 +195,43 @@ func (r *Reviewer) submitStructured(ctx context.Context, owner, repo string, prN
 		issues = 1
 	}
 	return issues, nil
+}
+
+// submitWithFallback submits a PR review and gracefully handles self-review
+// rejection. If the event is APPROVE and the API rejects it (HTTP 422 — GitHub
+// prohibits authors from approving their own PRs), it retries as a COMMENT.
+func (r *Reviewer) submitWithFallback(ctx context.Context, owner, repo string, prNumber int, event, body string, comments []gh.InlineComment) error {
+	var err error
+	if len(comments) > 0 {
+		err = r.GH.SubmitPRReview(ctx, owner, repo, prNumber, event, body, comments)
+	} else {
+		err = r.GH.SubmitReview(ctx, owner, repo, prNumber, event, body)
+	}
+
+	if err != nil && event == "APPROVE" && isSelfReviewError(err) {
+		fallbackEvent := "COMMENT"
+		body = strings.Replace(body, "(approved)", "(approved — self-review fallback)", 1)
+		body = strings.Replace(body, "(approve)", "(approve — self-review fallback)", 1)
+		if len(comments) > 0 {
+			return r.GH.SubmitPRReview(ctx, owner, repo, prNumber, fallbackEvent, body, comments)
+		}
+		return r.GH.SubmitReview(ctx, owner, repo, prNumber, fallbackEvent, body)
+	}
+
+	return err
+}
+
+// isSelfReviewError returns true if the error indicates GitHub rejected an
+// approval because the reviewer is the PR author.
+func isSelfReviewError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "can not approve your own pull request") ||
+		strings.Contains(msg, "cannot approve your own pull request") ||
+		strings.Contains(msg, "422") ||
+		strings.Contains(msg, "self-review")
 }
 
 // formatReviewBody builds the standardized review body with display name header.

@@ -771,6 +771,376 @@ func TestSubmitStructured_RequestChangesNoComments(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// ReviewLocal tests
+// ---------------------------------------------------------------------------
+
+func TestReviewLocal_EmptyDiff(t *testing.T) {
+	t.Parallel()
+	r := &Reviewer{
+		Agent: &mockBackend{},
+		GH: &mockGHReview{
+			getPRDiff: func(ctx context.Context, owner, repo string, prNumber int) (string, error) {
+				return "", nil
+			},
+		},
+	}
+
+	result, err := r.ReviewLocal(context.Background(), "owner", "repo", 1, defaultCfg())
+	if err != nil {
+		t.Fatalf("ReviewLocal() error = %v", err)
+	}
+	if !result.Approved {
+		t.Error("ReviewLocal() should approve empty diff")
+	}
+}
+
+func TestReviewLocal_DiffFetchError(t *testing.T) {
+	t.Parallel()
+	r := &Reviewer{
+		Agent: &mockBackend{},
+		GH: &mockGHReview{
+			getPRDiff: func(ctx context.Context, owner, repo string, prNumber int) (string, error) {
+				return "", errors.New("network error")
+			},
+		},
+	}
+
+	_, err := r.ReviewLocal(context.Background(), "owner", "repo", 1, defaultCfg())
+	if err == nil {
+		t.Fatal("ReviewLocal() expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "fetching PR diff") {
+		t.Errorf("expected 'fetching PR diff' in error, got %v", err)
+	}
+}
+
+func TestReviewLocal_AgentApproves(t *testing.T) {
+	t.Parallel()
+	r := &Reviewer{
+		Agent: &mockBackend{},
+		GH:    &mockGHReview{},
+	}
+
+	result, err := r.ReviewLocal(context.Background(), "owner", "repo", 1, defaultCfg())
+	if err != nil {
+		t.Fatalf("ReviewLocal() error = %v", err)
+	}
+	if !result.Approved {
+		t.Error("ReviewLocal() should approve when agent returns empty (LGTM)")
+	}
+}
+
+func TestReviewLocal_AgentError(t *testing.T) {
+	t.Parallel()
+	r := &Reviewer{
+		Agent: &mockBackend{
+			run: func(ctx context.Context, workdir string, prompt string, output io.Writer) error {
+				return errors.New("agent crashed")
+			},
+		},
+		GH: &mockGHReview{},
+	}
+
+	_, err := r.ReviewLocal(context.Background(), "owner", "repo", 1, defaultCfg())
+	if err == nil {
+		t.Fatal("ReviewLocal() expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "running review agent") {
+		t.Errorf("expected 'running review agent' in error, got %v", err)
+	}
+}
+
+func TestReviewLocal_DoesNotSubmitToGitHub(t *testing.T) {
+	t.Parallel()
+	var submitted bool
+	r := &Reviewer{
+		Agent: &mockBackend{},
+		GH: &mockGHReview{
+			submitReview: func(ctx context.Context, owner, repo string, prNumber int, event, body string) error {
+				submitted = true
+				return nil
+			},
+			submitPRReview: func(ctx context.Context, owner, repo string, prNumber int, event, body string, comments []gh.InlineComment) error {
+				submitted = true
+				return nil
+			},
+		},
+	}
+
+	_, err := r.ReviewLocal(context.Background(), "owner", "repo", 1, defaultCfg())
+	if err != nil {
+		t.Fatalf("ReviewLocal() error = %v", err)
+	}
+	if submitted {
+		t.Error("ReviewLocal() must not submit reviews to GitHub")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// parseReviewResponse tests
+// ---------------------------------------------------------------------------
+
+func TestParseReviewResponse_ApprovalPlainText(t *testing.T) {
+	t.Parallel()
+	result := parseReviewResponse("LGTM")
+	if !result.Approved {
+		t.Error("should approve for LGTM")
+	}
+}
+
+func TestParseReviewResponse_EmptyIsApproval(t *testing.T) {
+	t.Parallel()
+	result := parseReviewResponse("")
+	if !result.Approved {
+		t.Error("should approve for empty response")
+	}
+}
+
+func TestParseReviewResponse_IssuesPlainText(t *testing.T) {
+	t.Parallel()
+	result := parseReviewResponse("- Bug in foo.go line 42\n- Missing test")
+	if result.Approved {
+		t.Error("should not approve for list of issues")
+	}
+	if result.Issues != 2 {
+		t.Errorf("issues = %d, want 2", result.Issues)
+	}
+	if result.Feedback == "" {
+		t.Error("feedback should not be empty")
+	}
+}
+
+func TestParseReviewResponse_StructuredApproval(t *testing.T) {
+	t.Parallel()
+	input := `{"summary": "All good", "verdict": "approve", "comments": []}`
+	result := parseReviewResponse(input)
+	if !result.Approved {
+		t.Error("should approve for structured approval")
+	}
+}
+
+func TestParseReviewResponse_StructuredRequestChanges(t *testing.T) {
+	t.Parallel()
+	input := `{"summary": "Issues found", "verdict": "request_changes", "comments": [{"path": "x.go", "line": 1, "body": "bug"}]}`
+	result := parseReviewResponse(input)
+	if result.Approved {
+		t.Error("should not approve for request_changes")
+	}
+	if result.Issues != 1 {
+		t.Errorf("issues = %d, want 1", result.Issues)
+	}
+	if !strings.Contains(result.Feedback, "x.go:1") {
+		t.Errorf("feedback should contain file:line ref, got %q", result.Feedback)
+	}
+}
+
+func TestParseReviewResponse_StructuredRequestChangesNoComments(t *testing.T) {
+	t.Parallel()
+	input := `{"summary": "needs work", "verdict": "request_changes", "comments": []}`
+	result := parseReviewResponse(input)
+	if result.Approved {
+		t.Error("should not approve")
+	}
+	if result.Issues != 1 {
+		t.Errorf("issues = %d, want 1 (minimum)", result.Issues)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// formatLocalFeedback tests
+// ---------------------------------------------------------------------------
+
+func TestFormatLocalFeedback_NoComments(t *testing.T) {
+	t.Parallel()
+	sr := &structuredReview{Summary: "All good", Verdict: "approve"}
+	feedback := formatLocalFeedback(sr)
+	if feedback != "All good" {
+		t.Errorf("feedback = %q, want %q", feedback, "All good")
+	}
+}
+
+func TestFormatLocalFeedback_WithComments(t *testing.T) {
+	t.Parallel()
+	sr := &structuredReview{
+		Summary: "Issues found",
+		Verdict: "request_changes",
+		Comments: []reviewComment{
+			{Path: "main.go", Line: 10, Body: "Missing nil check"},
+			{Path: "util.go", Line: 25, Body: "Unused variable"},
+		},
+	}
+	feedback := formatLocalFeedback(sr)
+	if !strings.Contains(feedback, "Issues found") {
+		t.Errorf("feedback should contain summary, got %q", feedback)
+	}
+	if !strings.Contains(feedback, "1. main.go:10") {
+		t.Errorf("feedback should contain numbered comment ref, got %q", feedback)
+	}
+	if !strings.Contains(feedback, "2. util.go:25") {
+		t.Errorf("feedback should contain second comment ref, got %q", feedback)
+	}
+	if !strings.Contains(feedback, "Missing nil check") {
+		t.Errorf("feedback should contain comment body, got %q", feedback)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// submitWithFallback / self-review fallback tests
+// ---------------------------------------------------------------------------
+
+func TestSubmitWithFallback_NoError(t *testing.T) {
+	t.Parallel()
+	var capturedEvent string
+	r := &Reviewer{
+		GH: &mockGHReview{
+			submitReview: func(ctx context.Context, owner, repo string, prNumber int, event, body string) error {
+				capturedEvent = event
+				return nil
+			},
+		},
+	}
+
+	err := r.submitWithFallback(context.Background(), "owner", "repo", 42, "APPROVE", "body", nil)
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	if capturedEvent != "APPROVE" {
+		t.Errorf("event = %q, want APPROVE", capturedEvent)
+	}
+}
+
+func TestSubmitWithFallback_SelfReviewFallbackToComment(t *testing.T) {
+	t.Parallel()
+	callCount := 0
+	var events []string
+	r := &Reviewer{
+		GH: &mockGHReview{
+			submitReview: func(ctx context.Context, owner, repo string, prNumber int, event, body string) error {
+				callCount++
+				events = append(events, event)
+				if event == "APPROVE" {
+					return errors.New("422: can not approve your own pull request")
+				}
+				return nil
+			},
+		},
+	}
+
+	err := r.submitWithFallback(context.Background(), "owner", "repo", 42, "APPROVE", "## 🤖 Code Review (approved)\n\nbody", nil)
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	if callCount != 2 {
+		t.Errorf("submit called %d times, want 2 (APPROVE then COMMENT fallback)", callCount)
+	}
+	if len(events) != 2 || events[0] != "APPROVE" || events[1] != "COMMENT" {
+		t.Errorf("events = %v, want [APPROVE, COMMENT]", events)
+	}
+}
+
+func TestSubmitWithFallback_SelfReviewFallbackWithInlineComments(t *testing.T) {
+	t.Parallel()
+	callCount := 0
+	var events []string
+	r := &Reviewer{
+		GH: &mockGHReview{
+			submitPRReview: func(ctx context.Context, owner, repo string, prNumber int, event, body string, comments []gh.InlineComment) error {
+				callCount++
+				events = append(events, event)
+				if event == "APPROVE" {
+					return errors.New("422: cannot approve your own pull request")
+				}
+				return nil
+			},
+		},
+	}
+
+	comments := []gh.InlineComment{{Path: "x.go", Line: 1, Body: "ok"}}
+	err := r.submitWithFallback(context.Background(), "owner", "repo", 42, "APPROVE", "body", comments)
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	if callCount != 2 {
+		t.Errorf("submit called %d times, want 2", callCount)
+	}
+	if len(events) != 2 || events[1] != "COMMENT" {
+		t.Errorf("events = %v, want fallback to COMMENT", events)
+	}
+}
+
+func TestSubmitWithFallback_NonSelfReviewErrorNotRetried(t *testing.T) {
+	t.Parallel()
+	callCount := 0
+	r := &Reviewer{
+		GH: &mockGHReview{
+			submitReview: func(ctx context.Context, owner, repo string, prNumber int, event, body string) error {
+				callCount++
+				return errors.New("500: internal server error")
+			},
+		},
+	}
+
+	err := r.submitWithFallback(context.Background(), "owner", "repo", 42, "APPROVE", "body", nil)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if callCount != 1 {
+		t.Errorf("submit called %d times, want 1 (no fallback for non-self-review error)", callCount)
+	}
+}
+
+func TestSubmitWithFallback_RequestChangesNotRetried(t *testing.T) {
+	t.Parallel()
+	callCount := 0
+	r := &Reviewer{
+		GH: &mockGHReview{
+			submitReview: func(ctx context.Context, owner, repo string, prNumber int, event, body string) error {
+				callCount++
+				return errors.New("422: can not approve your own pull request")
+			},
+		},
+	}
+
+	err := r.submitWithFallback(context.Background(), "owner", "repo", 42, "REQUEST_CHANGES", "body", nil)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if callCount != 1 {
+		t.Errorf("submit called %d times, want 1 (no fallback for REQUEST_CHANGES)", callCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// isSelfReviewError tests
+// ---------------------------------------------------------------------------
+
+func TestIsSelfReviewError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"can not approve", errors.New("422: can not approve your own pull request"), true},
+		{"cannot approve", errors.New("cannot approve your own pull request"), true},
+		{"422 status", errors.New("gh api: 422: Unprocessable Entity"), true},
+		{"self-review keyword", errors.New("self-review not allowed"), true},
+		{"unrelated error", errors.New("500: internal server error"), false},
+		{"network error", errors.New("connection refused"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := isSelfReviewError(tt.err)
+			if got != tt.want {
+				t.Errorf("isSelfReviewError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
