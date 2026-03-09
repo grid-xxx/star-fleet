@@ -193,6 +193,203 @@ func TestCheckCIStatus(t *testing.T) {
 	}
 }
 
+func TestGetAuthenticatedUser(t *testing.T) {
+	origRunFn := runFn
+	t.Cleanup(func() { runFn = origRunFn })
+
+	runFn = func(_ context.Context, _ string, args ...string) (string, error) {
+		return "octocat\n", nil
+	}
+
+	user, err := GetAuthenticatedUser(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if user != "octocat" {
+		t.Errorf("user = %q, want %q", user, "octocat")
+	}
+}
+
+func TestGetPRAuthor(t *testing.T) {
+	origRunFn := runFn
+	t.Cleanup(func() { runFn = origRunFn })
+
+	runFn = func(_ context.Context, _ string, args ...string) (string, error) {
+		return "pr-author\n", nil
+	}
+
+	author, err := GetPRAuthor(context.Background(), "owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if author != "pr-author" {
+		t.Errorf("author = %q, want %q", author, "pr-author")
+	}
+}
+
+func TestSubmitReview_FallbackToCommentOnOwnPR(t *testing.T) {
+	origRunFn := runFn
+	t.Cleanup(func() { runFn = origRunFn })
+
+	var reviewCalls [][]string
+
+	runFn = func(_ context.Context, _ string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		// GetAuthenticatedUser call
+		if len(args) >= 2 && args[0] == "api" && args[1] == "user" {
+			return "octocat\n", nil
+		}
+		// GetPRAuthor call
+		if len(args) >= 2 && args[0] == "pr" && args[1] == "view" && containsArg(args, "--json") {
+			return "octocat\n", nil
+		}
+		// pr review call
+		if len(args) >= 2 && args[0] == "pr" && args[1] == "review" {
+			reviewCalls = append(reviewCalls, args)
+			return "", nil
+		}
+		return "", fmt.Errorf("unexpected call: %s", joined)
+	}
+
+	err := SubmitReview(context.Background(), "owner", "repo", 42, "REQUEST_CHANGES", "needs work")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reviewCalls) != 1 {
+		t.Fatalf("expected 1 review call, got %d", len(reviewCalls))
+	}
+	if !containsArg(reviewCalls[0], "--comment") {
+		t.Errorf("expected --comment flag in review call, got %v", reviewCalls[0])
+	}
+	if containsArg(reviewCalls[0], "--request-changes") {
+		t.Errorf("should NOT have --request-changes flag when reviewing own PR, got %v", reviewCalls[0])
+	}
+}
+
+func TestSubmitReview_RequestChangesOnDifferentAuthor(t *testing.T) {
+	origRunFn := runFn
+	t.Cleanup(func() { runFn = origRunFn })
+
+	var reviewCalls [][]string
+
+	runFn = func(_ context.Context, _ string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if len(args) >= 2 && args[0] == "api" && args[1] == "user" {
+			return "reviewer-bot\n", nil
+		}
+		if len(args) >= 2 && args[0] == "pr" && args[1] == "view" && containsArg(args, "--json") {
+			return "pr-author\n", nil
+		}
+		if len(args) >= 2 && args[0] == "pr" && args[1] == "review" {
+			reviewCalls = append(reviewCalls, args)
+			return "", nil
+		}
+		return "", fmt.Errorf("unexpected call: %s", joined)
+	}
+
+	err := SubmitReview(context.Background(), "owner", "repo", 42, "REQUEST_CHANGES", "needs work")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reviewCalls) != 1 {
+		t.Fatalf("expected 1 review call, got %d", len(reviewCalls))
+	}
+	if !containsArg(reviewCalls[0], "--request-changes") {
+		t.Errorf("expected --request-changes flag, got %v", reviewCalls[0])
+	}
+}
+
+func TestSubmitReview_RuntimeFallbackOnOwnPRError(t *testing.T) {
+	origRunFn := runFn
+	t.Cleanup(func() { runFn = origRunFn })
+
+	var reviewCalls [][]string
+	callCount := 0
+
+	runFn = func(_ context.Context, _ string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if len(args) >= 2 && args[0] == "api" && args[1] == "user" {
+			return "", fmt.Errorf("api error")
+		}
+		if len(args) >= 2 && args[0] == "pr" && args[1] == "review" {
+			callCount++
+			reviewCalls = append(reviewCalls, args)
+			if callCount == 1 && containsArg(args, "--request-changes") {
+				return "", fmt.Errorf("Review Can not request changes on your own pull request")
+			}
+			return "", nil
+		}
+		return "", fmt.Errorf("unexpected call: %s", joined)
+	}
+
+	err := SubmitReview(context.Background(), "owner", "repo", 42, "REQUEST_CHANGES", "needs work")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reviewCalls) != 2 {
+		t.Fatalf("expected 2 review calls (original + fallback), got %d", len(reviewCalls))
+	}
+	if !containsArg(reviewCalls[0], "--request-changes") {
+		t.Errorf("first call should use --request-changes, got %v", reviewCalls[0])
+	}
+	if !containsArg(reviewCalls[1], "--comment") {
+		t.Errorf("second call should use --comment, got %v", reviewCalls[1])
+	}
+}
+
+func TestSubmitReview_CommentEventUnchanged(t *testing.T) {
+	origRunFn := runFn
+	t.Cleanup(func() { runFn = origRunFn })
+
+	var reviewCalls [][]string
+
+	runFn = func(_ context.Context, _ string, args ...string) (string, error) {
+		if len(args) >= 2 && args[0] == "pr" && args[1] == "review" {
+			reviewCalls = append(reviewCalls, args)
+			return "", nil
+		}
+		return "", nil
+	}
+
+	err := SubmitReview(context.Background(), "owner", "repo", 42, "COMMENT", "looks good")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(reviewCalls) != 1 {
+		t.Fatalf("expected 1 review call, got %d", len(reviewCalls))
+	}
+	if !containsArg(reviewCalls[0], "--comment") {
+		t.Errorf("expected --comment flag, got %v", reviewCalls[0])
+	}
+}
+
+func TestIsOwnPRError(t *testing.T) {
+	tests := []struct {
+		err  error
+		want bool
+	}{
+		{fmt.Errorf("Review Can not request changes on your own pull request"), true},
+		{fmt.Errorf("review can not request changes on your own pull request"), true},
+		{fmt.Errorf("some other error"), false},
+		{nil, false},
+	}
+	for _, tt := range tests {
+		got := isOwnPRError(tt.err)
+		if got != tt.want {
+			t.Errorf("isOwnPRError(%v) = %v, want %v", tt.err, got, tt.want)
+		}
+	}
+}
+
+func containsArg(args []string, target string) bool {
+	for _, a := range args {
+		if a == target {
+			return true
+		}
+	}
+	return false
+}
+
 func TestParsePRURL(t *testing.T) {
 	tests := []struct {
 		url    string
