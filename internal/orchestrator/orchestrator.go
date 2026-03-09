@@ -26,6 +26,7 @@ type GHClient interface {
 	MergePR(ctx context.Context, owner, repo string, number int) error
 	GetPRDiff(ctx context.Context, owner, repo string, prNumber int) (string, error)
 	SubmitReview(ctx context.Context, owner, repo string, prNumber int, event, body string) error
+	SubmitPRReview(ctx context.Context, owner, repo string, prNumber int, event, body string, comments []gh.InlineComment) error
 }
 
 // ReviewRunner abstracts the review process for testing.
@@ -83,6 +84,9 @@ func (defaultGH) GetPRDiff(ctx context.Context, owner, repo string, prNumber int
 }
 func (defaultGH) SubmitReview(ctx context.Context, owner, repo string, prNumber int, event, body string) error {
 	return gh.SubmitReview(ctx, owner, repo, prNumber, event, body)
+}
+func (defaultGH) SubmitPRReview(ctx context.Context, owner, repo string, prNumber int, event, body string, comments []gh.InlineComment) error {
+	return gh.SubmitPRReview(ctx, owner, repo, prNumber, event, body, comments)
 }
 
 type defaultGit struct{}

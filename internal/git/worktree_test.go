@@ -554,6 +554,94 @@ func TestDeleteBranch(t *testing.T) {
 	}
 }
 
+func TestEnsureGitignore_CreatesFile(t *testing.T) {
+	dir := t.TempDir()
+
+	EnsureGitignore(dir, "worktrees/", ".fleet/")
+
+	data, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		t.Fatalf("reading .gitignore: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "worktrees/") {
+		t.Errorf(".gitignore should contain 'worktrees/', got %q", content)
+	}
+	if !strings.Contains(content, ".fleet/") {
+		t.Errorf(".gitignore should contain '.fleet/', got %q", content)
+	}
+}
+
+func TestEnsureGitignore_NoDoubleAdd(t *testing.T) {
+	dir := t.TempDir()
+	initial := "worktrees/\n.fleet/\n"
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	EnsureGitignore(dir, "worktrees/", ".fleet/")
+
+	data, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != initial {
+		t.Errorf("expected no changes, .gitignore = %q, want %q", data, initial)
+	}
+}
+
+func TestEnsureGitignore_AppendsToExisting(t *testing.T) {
+	dir := t.TempDir()
+	initial := "*.log\n"
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	EnsureGitignore(dir, "worktrees/", ".fleet/")
+
+	data, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "*.log") {
+		t.Error("should preserve existing patterns")
+	}
+	if !strings.Contains(content, "worktrees/") {
+		t.Error("should add worktrees/")
+	}
+	if !strings.Contains(content, ".fleet/") {
+		t.Error("should add .fleet/")
+	}
+	if !strings.Contains(content, "# Fleet runtime") {
+		t.Error("should include Fleet comment header")
+	}
+}
+
+func TestEnsureGitignore_PartiallyPresent(t *testing.T) {
+	dir := t.TempDir()
+	initial := "worktrees/\n"
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	EnsureGitignore(dir, "worktrees/", ".fleet/")
+
+	data, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, ".fleet/") {
+		t.Error("should add missing .fleet/ pattern")
+	}
+	// worktrees/ should appear only once
+	count := strings.Count(content, "worktrees/")
+	if count != 1 {
+		t.Errorf("worktrees/ appears %d times, want 1", count)
+	}
+}
+
 func TestRepoRoot(t *testing.T) {
 	dir := t.TempDir()
 	initRepo(t, dir)

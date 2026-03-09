@@ -21,14 +21,15 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockGH struct {
-	fetchIssue    func(ctx context.Context, owner, repo string, number int) (*gh.Issue, error)
-	postComment   func(ctx context.Context, owner, repo string, number int, body string) error
-	defaultBranch func(ctx context.Context, owner, repo string) (string, error)
-	findPR        func(ctx context.Context, owner, repo, head string) (*gh.PR, error)
-	createPR      func(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*gh.PR, error)
-	mergePR       func(ctx context.Context, owner, repo string, number int) error
-	getPRDiff     func(ctx context.Context, owner, repo string, prNumber int) (string, error)
-	submitReview  func(ctx context.Context, owner, repo string, prNumber int, event, body string) error
+	fetchIssue      func(ctx context.Context, owner, repo string, number int) (*gh.Issue, error)
+	postComment     func(ctx context.Context, owner, repo string, number int, body string) error
+	defaultBranch   func(ctx context.Context, owner, repo string) (string, error)
+	findPR          func(ctx context.Context, owner, repo, head string) (*gh.PR, error)
+	createPR        func(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*gh.PR, error)
+	mergePR         func(ctx context.Context, owner, repo string, number int) error
+	getPRDiff       func(ctx context.Context, owner, repo string, prNumber int) (string, error)
+	submitReview    func(ctx context.Context, owner, repo string, prNumber int, event, body string) error
+	submitPRReview  func(ctx context.Context, owner, repo string, prNumber int, event, body string, comments []gh.InlineComment) error
 }
 
 func (m *mockGH) FetchIssue(ctx context.Context, owner, repo string, number int) (*gh.Issue, error) {
@@ -76,6 +77,12 @@ func (m *mockGH) GetPRDiff(ctx context.Context, owner, repo string, prNumber int
 func (m *mockGH) SubmitReview(ctx context.Context, owner, repo string, prNumber int, event, body string) error {
 	if m.submitReview != nil {
 		return m.submitReview(ctx, owner, repo, prNumber, event, body)
+	}
+	return nil
+}
+func (m *mockGH) SubmitPRReview(ctx context.Context, owner, repo string, prNumber int, event, body string, comments []gh.InlineComment) error {
+	if m.submitPRReview != nil {
+		return m.submitPRReview(ctx, owner, repo, prNumber, event, body, comments)
 	}
 	return nil
 }

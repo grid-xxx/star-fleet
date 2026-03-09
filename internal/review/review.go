@@ -2,18 +2,21 @@ package review
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/nullne/star-fleet/internal/agent"
 	"github.com/nullne/star-fleet/internal/config"
+	"github.com/nullne/star-fleet/internal/gh"
 )
 
 // GHReview abstracts the GitHub operations needed for code review.
 type GHReview interface {
 	GetPRDiff(ctx context.Context, owner, repo string, prNumber int) (string, error)
 	SubmitReview(ctx context.Context, owner, repo string, prNumber int, event, body string) error
+	SubmitPRReview(ctx context.Context, owner, repo string, prNumber int, event, body string, comments []gh.InlineComment) error
 	PostComment(ctx context.Context, owner, repo string, number int, body string) error
 }
 
@@ -27,6 +30,19 @@ type Reviewer struct {
 type ReviewResult struct {
 	Approved bool
 	Comments string
+}
+
+// structuredReview is the JSON format the review agent is asked to produce.
+type structuredReview struct {
+	Summary  string          `json:"summary"`
+	Verdict  string          `json:"verdict"` // "approve" or "request_changes"
+	Comments []reviewComment `json:"comments"`
+}
+
+type reviewComment struct {
+	Path string `json:"path"`
+	Line int    `json:"line"`
+	Body string `json:"body"`
 }
 
 // Review fetches the PR diff, sends it to the review agent, and posts the review.
@@ -50,15 +66,27 @@ func (r *Reviewer) Review(ctx context.Context, owner, repo string, prNumber int,
 
 	response = strings.TrimSpace(response)
 
+	displayName := "Code Review"
+	if cfg != nil && cfg.Name != "" {
+		displayName = cfg.Name
+	}
+
+	// Try to parse structured JSON response
+	if sr, ok := parseStructuredReview(response); ok {
+		return r.submitStructured(ctx, owner, repo, prNumber, sr, displayName)
+	}
+
+	// Fall back to legacy plain-text handling
 	if isApproval(response) {
-		if err := r.GH.SubmitReview(ctx, owner, repo, prNumber, "APPROVE",
-			"✅ Star Fleet — Code review passed"); err != nil {
+		body := formatReviewBody(displayName, "approved", "No issues found.", 0)
+		if err := r.GH.SubmitReview(ctx, owner, repo, prNumber, "APPROVE", body); err != nil {
 			return 0, fmt.Errorf("submitting approval: %w", err)
 		}
 		return 0, nil
 	}
 
-	if err := r.GH.SubmitReview(ctx, owner, repo, prNumber, "REQUEST_CHANGES", response); err != nil {
+	body := formatReviewBody(displayName, "request_changes", response, countIssues(response))
+	if err := r.GH.SubmitReview(ctx, owner, repo, prNumber, "REQUEST_CHANGES", body); err != nil {
 		return 0, fmt.Errorf("submitting review: %w", err)
 	}
 
@@ -67,6 +95,95 @@ func (r *Reviewer) Review(ctx context.Context, owner, repo string, prNumber int,
 		issues = 1
 	}
 	return issues, nil
+}
+
+func (r *Reviewer) submitStructured(ctx context.Context, owner, repo string, prNumber int, sr *structuredReview, displayName string) (int, error) {
+	verdict := strings.ToLower(sr.Verdict)
+	approved := verdict == "approve" || verdict == "approved" || verdict == "lgtm"
+
+	event := "REQUEST_CHANGES"
+	if approved {
+		event = "APPROVE"
+	}
+
+	body := formatReviewBody(displayName, verdict, sr.Summary, len(sr.Comments))
+
+	var inlineComments []gh.InlineComment
+	for _, c := range sr.Comments {
+		inlineComments = append(inlineComments, gh.InlineComment{
+			Path: c.Path,
+			Line: c.Line,
+			Body: c.Body,
+		})
+	}
+
+	if err := r.GH.SubmitPRReview(ctx, owner, repo, prNumber, event, body, inlineComments); err != nil {
+		return 0, fmt.Errorf("submitting review: %w", err)
+	}
+
+	if approved {
+		return 0, nil
+	}
+
+	issues := len(sr.Comments)
+	if issues == 0 {
+		issues = 1
+	}
+	return issues, nil
+}
+
+// formatReviewBody builds the standardized review body with display name header.
+func formatReviewBody(displayName, verdict, summary string, commentCount int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "## 🤖 %s (%s)\n\n", displayName, verdict)
+	b.WriteString(summary)
+	if commentCount > 0 {
+		fmt.Fprintf(&b, "\n\n📝 %d inline comment(s) below.", commentCount)
+	}
+	return b.String()
+}
+
+// parseStructuredReview attempts to parse the agent response as structured JSON.
+// The agent may wrap JSON in a markdown code fence.
+func parseStructuredReview(response string) (*structuredReview, bool) {
+	raw := extractJSON(response)
+	if raw == "" {
+		return nil, false
+	}
+	var sr structuredReview
+	if err := json.Unmarshal([]byte(raw), &sr); err != nil {
+		return nil, false
+	}
+	if sr.Verdict == "" {
+		return nil, false
+	}
+	return &sr, true
+}
+
+// extractJSON strips markdown code fences and extracts the first JSON object.
+func extractJSON(s string) string {
+	// Try stripping ```json ... ``` fences
+	if idx := strings.Index(s, "```json"); idx >= 0 {
+		start := idx + len("```json")
+		if end := strings.Index(s[start:], "```"); end >= 0 {
+			return strings.TrimSpace(s[start : start+end])
+		}
+	}
+	if idx := strings.Index(s, "```"); idx >= 0 {
+		start := idx + len("```")
+		if end := strings.Index(s[start:], "```"); end >= 0 {
+			candidate := strings.TrimSpace(s[start : start+end])
+			if len(candidate) > 0 && candidate[0] == '{' {
+				return candidate
+			}
+		}
+	}
+	// Try the raw string itself
+	s = strings.TrimSpace(s)
+	if len(s) > 0 && s[0] == '{' {
+		return s
+	}
+	return ""
 }
 
 // IsApproved checks if the latest review from fleet is an approval.
@@ -122,9 +239,19 @@ Only comment on real problems:
 
 Do NOT comment on things that are fine. Do NOT add praise or filler.
 
-If there are no issues, respond with exactly: NO_ISSUES
+## Output Format
 
-If there are issues, list each one as a bullet point with the file path and line number.
+Respond with a JSON object (no markdown fence) in this exact format:
+
+{
+  "summary": "Brief overall summary of the review",
+  "verdict": "approve" or "request_changes",
+  "comments": [
+    {"path": "file/path.go", "line": 42, "body": "Description of the issue"}
+  ]
+}
+
+If there are no issues, use verdict "approve" and an empty comments array.
 
 ## Diff
 

@@ -193,6 +193,99 @@ func TestCheckCIStatus(t *testing.T) {
 	}
 }
 
+func TestSubmitPRReview_NoComments_FallsBack(t *testing.T) {
+	origRunFn := runFn
+	t.Cleanup(func() { runFn = origRunFn })
+
+	var capturedArgs []string
+	runFn = func(_ context.Context, _ string, args ...string) (string, error) {
+		capturedArgs = args
+		return "", nil
+	}
+
+	err := SubmitPRReview(context.Background(), "owner", "repo", 42, "APPROVE", "Looks good", nil)
+	if err != nil {
+		t.Fatalf("SubmitPRReview() error = %v", err)
+	}
+	// Should fall back to SubmitReview (gh pr review)
+	if len(capturedArgs) == 0 {
+		t.Fatal("expected captured args from SubmitReview fallback")
+	}
+	found := false
+	for _, a := range capturedArgs {
+		if a == "--approve" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected --approve flag in args, got %v", capturedArgs)
+	}
+}
+
+func TestSubmitPRReview_WithComments(t *testing.T) {
+	origFn := submitReviewFn
+	t.Cleanup(func() { submitReviewFn = origFn })
+
+	var capturedEndpoint string
+	var capturedPayload []byte
+	submitReviewFn = func(_ context.Context, endpoint string, payload []byte) (string, error) {
+		capturedEndpoint = endpoint
+		capturedPayload = payload
+		return "", nil
+	}
+
+	comments := []InlineComment{
+		{Path: "main.go", Line: 10, Body: "Missing nil check"},
+		{Path: "util.go", Line: 25, Body: "Unused variable"},
+	}
+
+	err := SubmitPRReview(context.Background(), "owner", "repo", 42, "REQUEST_CHANGES", "Issues found", comments)
+	if err != nil {
+		t.Fatalf("SubmitPRReview() error = %v", err)
+	}
+
+	if capturedEndpoint != "repos/owner/repo/pulls/42/reviews" {
+		t.Errorf("endpoint = %q, want %q", capturedEndpoint, "repos/owner/repo/pulls/42/reviews")
+	}
+
+	// Verify payload contains the comments
+	payloadStr := string(capturedPayload)
+	if !strings.Contains(payloadStr, "main.go") {
+		t.Errorf("payload should contain 'main.go', got %q", payloadStr)
+	}
+	if !strings.Contains(payloadStr, "REQUEST_CHANGES") {
+		t.Errorf("payload should contain 'REQUEST_CHANGES', got %q", payloadStr)
+	}
+}
+
+func TestSubmitPRReview_InvalidEvent(t *testing.T) {
+	err := SubmitPRReview(context.Background(), "owner", "repo", 42, "INVALID", "body", nil)
+	if err == nil {
+		t.Fatal("expected error for invalid event")
+	}
+	if !strings.Contains(err.Error(), "unknown review event") {
+		t.Errorf("expected 'unknown review event' error, got %v", err)
+	}
+}
+
+func TestSubmitPRReview_APIError(t *testing.T) {
+	origFn := submitReviewFn
+	t.Cleanup(func() { submitReviewFn = origFn })
+
+	submitReviewFn = func(_ context.Context, endpoint string, payload []byte) (string, error) {
+		return "", fmt.Errorf("gh api %s: 422: %w", endpoint, fmt.Errorf("unprocessable entity"))
+	}
+
+	comments := []InlineComment{{Path: "x.go", Line: 1, Body: "bug"}}
+	err := SubmitPRReview(context.Background(), "owner", "repo", 1, "COMMENT", "body", comments)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "submitting PR review") {
+		t.Errorf("expected 'submitting PR review' error, got %v", err)
+	}
+}
+
 func TestParsePRURL(t *testing.T) {
 	tests := []struct {
 		url    string

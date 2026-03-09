@@ -18,6 +18,8 @@ func CreateWorktree(ctx context.Context, repoRoot, name, branch string) (string,
 		return "", fmt.Errorf("creating worktrees dir: %w", err)
 	}
 
+	EnsureGitignore(repoRoot, "worktrees/", ".fleet/")
+
 	if _, err := runGit(ctx, repoRoot, "worktree", "add", "-b", branch, dir); err != nil {
 		// Branch may already exist from a prior run; try without -b
 		if _, err2 := runGit(ctx, repoRoot, "worktree", "add", dir, branch); err2 != nil {
@@ -28,6 +30,48 @@ func CreateWorktree(ctx context.Context, repoRoot, name, branch string) (string,
 		}
 	}
 	return dir, nil
+}
+
+// EnsureGitignore adds the given patterns to the repo's .gitignore if they
+// are not already present. This prevents fleet runtime artifacts from
+// polluting `git status` in the target repo.
+func EnsureGitignore(repoRoot string, patterns ...string) {
+	gi := filepath.Join(repoRoot, ".gitignore")
+
+	existing := ""
+	if data, err := os.ReadFile(gi); err == nil {
+		existing = string(data)
+	}
+
+	lines := strings.Split(existing, "\n")
+	present := make(map[string]bool, len(lines))
+	for _, l := range lines {
+		present[strings.TrimSpace(l)] = true
+	}
+
+	var toAdd []string
+	for _, p := range patterns {
+		if !present[p] {
+			toAdd = append(toAdd, p)
+		}
+	}
+
+	if len(toAdd) == 0 {
+		return
+	}
+
+	content := existing
+	if content != "" && !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	if content != "" {
+		content += "\n# Fleet runtime (auto-added)\n"
+	}
+	for _, p := range toAdd {
+		content += p + "\n"
+	}
+
+	_ = os.WriteFile(gi, []byte(content), 0o644)
 }
 
 func RemoveWorktree(ctx context.Context, repoRoot, name string) error {

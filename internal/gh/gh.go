@@ -190,6 +190,79 @@ func GetPRDiff(ctx context.Context, owner, repo string, prNumber int) (string, e
 	return runFn(ctx, "", "pr", "diff", strconv.Itoa(prNumber), "--repo", nwo)
 }
 
+// InlineComment represents a single inline comment on a specific file and line.
+type InlineComment struct {
+	Path string `json:"path"`
+	Line int    `json:"line"`
+	Body string `json:"body"`
+}
+
+// SubmitPRReview submits a formal PR review with inline comments via the
+// GitHub API. event must be "APPROVE", "REQUEST_CHANGES", or "COMMENT".
+// Falls back to SubmitReview (no inline comments) if comments is empty.
+func SubmitPRReview(ctx context.Context, owner, repo string, prNumber int, event, body string, comments []InlineComment) error {
+	switch event {
+	case "APPROVE", "REQUEST_CHANGES", "COMMENT":
+	default:
+		return fmt.Errorf("unknown review event %q", event)
+	}
+
+	if len(comments) == 0 {
+		return SubmitReview(ctx, owner, repo, prNumber, event, body)
+	}
+
+	type apiComment struct {
+		Path string `json:"path"`
+		Line int    `json:"line"`
+		Body string `json:"body"`
+	}
+
+	payload := struct {
+		Event    string       `json:"event"`
+		Body     string       `json:"body"`
+		Comments []apiComment `json:"comments,omitempty"`
+	}{
+		Event: event,
+		Body:  body,
+	}
+	for _, c := range comments {
+		payload.Comments = append(payload.Comments, apiComment{
+			Path: c.Path,
+			Line: c.Line,
+			Body: c.Body,
+		})
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshaling review payload: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("repos/%s/%s/pulls/%d/reviews", owner, repo, prNumber)
+	_, err = submitReviewFn(ctx, endpoint, data)
+	if err != nil {
+		return fmt.Errorf("submitting PR review: %w", err)
+	}
+
+	return nil
+}
+
+// submitReviewFn executes the gh api call to submit a review.
+// It is a var so tests can replace it.
+var submitReviewFn = submitReview
+
+func submitReview(ctx context.Context, endpoint string, payload []byte) (string, error) {
+	cmd := exec.CommandContext(ctx, "gh", "api", endpoint, "--method", "POST", "--input", "-")
+	cmd.Stdin = bytes.NewReader(payload)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("gh api %s: %s: %w", endpoint, stderr.String(), err)
+	}
+	return stdout.String(), nil
+}
+
 // SubmitReview submits a pull request review with the given event and body.
 // event must be "APPROVE", "REQUEST_CHANGES", or "COMMENT".
 func SubmitReview(ctx context.Context, owner, repo string, prNumber int, event, body string) error {
@@ -375,6 +448,13 @@ func SetRunFn(fn func(ctx context.Context, dir string, args ...string) (string, 
 	orig := runFn
 	runFn = fn
 	return func() { runFn = orig }
+}
+
+// SetSubmitReviewFn replaces the review submission executor for testing.
+func SetSubmitReviewFn(fn func(ctx context.Context, endpoint string, payload []byte) (string, error)) func() {
+	orig := submitReviewFn
+	submitReviewFn = fn
+	return func() { submitReviewFn = orig }
 }
 
 func run(ctx context.Context, dir string, args ...string) (string, error) {

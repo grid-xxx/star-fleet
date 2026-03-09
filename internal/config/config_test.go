@@ -151,6 +151,9 @@ func TestReviewDefaults(t *testing.T) {
 	if cfg.Review.PromptFile != "" {
 		t.Errorf("review.prompt_file should default to empty, got %q", cfg.Review.PromptFile)
 	}
+	if cfg.Review.Name != "Code Review" {
+		t.Errorf("review.name should default to %q, got %q", "Code Review", cfg.Review.Name)
+	}
 }
 
 func TestLoadReviewConfig(t *testing.T) {
@@ -168,6 +171,7 @@ enabled = false
 max_rounds = 5
 backend = "cursor"
 prompt_file = "review.md"
+name = "Fleet Bot"
 `
 	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(data), 0o644); err != nil {
 		t.Fatal(err)
@@ -189,6 +193,9 @@ prompt_file = "review.md"
 	}
 	if cfg.Review.PromptFile != "review.md" {
 		t.Errorf("review.prompt_file = %q, want %q", cfg.Review.PromptFile, "review.md")
+	}
+	if cfg.Review.Name != "Fleet Bot" {
+		t.Errorf("review.name = %q, want %q", cfg.Review.Name, "Fleet Bot")
 	}
 }
 
