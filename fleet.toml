@@ -1,0 +1,7 @@
+[agent]
+backend = "cursor"
+
+[review]
+backend = "cursor"
+enabled = true
+max_rounds = 3
