@@ -263,6 +263,101 @@ command = "make test"
 	}
 }
 
+func TestTelegramDefaults(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Telegram.BotToken != "" {
+		t.Errorf("telegram.bot_token should default to empty, got %q", cfg.Telegram.BotToken)
+	}
+	if cfg.Telegram.ChatID != "" {
+		t.Errorf("telegram.chat_id should default to empty, got %q", cfg.Telegram.ChatID)
+	}
+}
+
+func TestLoadTelegramConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgDir := filepath.Join(dir, ".fleet")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	data := `[agent]
+backend = "claude-code"
+
+[telegram]
+bot_token = "123:ABC"
+chat_id = "-100999"
+`
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Telegram.BotToken != "123:ABC" {
+		t.Errorf("telegram.bot_token = %q, want %q", cfg.Telegram.BotToken, "123:ABC")
+	}
+	if cfg.Telegram.ChatID != "-100999" {
+		t.Errorf("telegram.chat_id = %q, want %q", cfg.Telegram.ChatID, "-100999")
+	}
+}
+
+func TestTelegramEnvVarOverride(t *testing.T) {
+	dir := t.TempDir()
+	cfgDir := filepath.Join(dir, ".fleet")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	data := `[agent]
+backend = "claude-code"
+
+[telegram]
+bot_token = "file-token"
+chat_id = "file-chat"
+`
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("FLEET_TELEGRAM_BOT_TOKEN", "env-token")
+	t.Setenv("FLEET_TELEGRAM_CHAT_ID", "env-chat")
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Telegram.BotToken != "env-token" {
+		t.Errorf("telegram.bot_token = %q, want env override %q", cfg.Telegram.BotToken, "env-token")
+	}
+	if cfg.Telegram.ChatID != "env-chat" {
+		t.Errorf("telegram.chat_id = %q, want env override %q", cfg.Telegram.ChatID, "env-chat")
+	}
+}
+
+func TestTelegramEnvVarWithoutFile(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Setenv("FLEET_TELEGRAM_BOT_TOKEN", "env-only-token")
+	t.Setenv("FLEET_TELEGRAM_CHAT_ID", "env-only-chat")
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Telegram.BotToken != "env-only-token" {
+		t.Errorf("telegram.bot_token = %q, want %q", cfg.Telegram.BotToken, "env-only-token")
+	}
+	if cfg.Telegram.ChatID != "env-only-chat" {
+		t.Errorf("telegram.chat_id = %q, want %q", cfg.Telegram.ChatID, "env-only-chat")
+	}
+}
+
 func TestInvalidBackend(t *testing.T) {
 	dir := t.TempDir()
 	cfgDir := filepath.Join(dir, ".fleet")

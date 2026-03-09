@@ -137,6 +137,28 @@ func (noopBackend) Run(ctx context.Context, workdir string, prompt string, outpu
 	return nil
 }
 
+type mockNotifier struct {
+	prCreated func(prNumber, issueNumber int, title string)
+	prMerged  func(prNumber, issueNumber int)
+	runFailed func(issueNumber int, errMsg string)
+}
+
+func (m *mockNotifier) PRCreated(prNumber, issueNumber int, title string) {
+	if m.prCreated != nil {
+		m.prCreated(prNumber, issueNumber, title)
+	}
+}
+func (m *mockNotifier) PRMerged(prNumber, issueNumber int) {
+	if m.prMerged != nil {
+		m.prMerged(prNumber, issueNumber)
+	}
+}
+func (m *mockNotifier) RunFailed(issueNumber int, errMsg string) {
+	if m.runFailed != nil {
+		m.runFailed(issueNumber, errMsg)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -166,6 +188,7 @@ func baseOrchestrator(t *testing.T) *Orchestrator {
 		State:    &mockState{},
 		Watch:    &mockWatch{},
 		Backend:  &mockBackendFactory{},
+		Notify:   &mockNotifier{},
 	}
 }
 
@@ -1271,6 +1294,165 @@ func TestRun_StateLoadError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Notification tests
+// ---------------------------------------------------------------------------
+
+func TestPhasePR_NotifiesPRCreated(t *testing.T) {
+	t.Parallel()
+	var notifiedPR, notifiedIssue int
+	var notifiedTitle string
+
+	o := baseOrchestrator(t)
+	o.Number = 5
+	o.Notify = &mockNotifier{
+		prCreated: func(prNumber, issueNumber int, title string) {
+			notifiedPR = prNumber
+			notifiedIssue = issueNumber
+			notifiedTitle = title
+		},
+	}
+
+	s := state.New(t.TempDir(), "owner", "repo", 5)
+	s.Phase = state.PhaseImplement
+	s.BaseBranch = "main"
+
+	issue := &gh.Issue{Number: 5, Title: "Add dark mode", Body: strings.Repeat("x", 100)}
+	pr, err := o.phasePR(context.Background(), s, testCodeAgent(), issue)
+	if err != nil {
+		t.Fatalf("phasePR() error = %v", err)
+	}
+	if notifiedPR != pr.Number {
+		t.Errorf("notified PR = %d, want %d", notifiedPR, pr.Number)
+	}
+	if notifiedIssue != 5 {
+		t.Errorf("notified issue = %d, want 5", notifiedIssue)
+	}
+	if notifiedTitle != "Add dark mode" {
+		t.Errorf("notified title = %q, want %q", notifiedTitle, "Add dark mode")
+	}
+}
+
+func TestPhaseWatch_Merged_NotifiesPRMerged(t *testing.T) {
+	t.Parallel()
+	var notifiedPR, notifiedIssue int
+
+	o := baseOrchestrator(t)
+	o.Number = 8
+	o.Watch = &mockWatch{
+		loop: func(ctx context.Context, codeAgent *agent.CodeAgent, s *state.RunState, cfg *config.Config, display *ui.Display) (*watch.Result, error) {
+			return &watch.Result{Reason: watch.ExitMerged}, nil
+		},
+	}
+	o.Notify = &mockNotifier{
+		prMerged: func(prNumber, issueNumber int) {
+			notifiedPR = prNumber
+			notifiedIssue = issueNumber
+		},
+	}
+
+	s := state.New(t.TempDir(), "owner", "repo", 8)
+	s.Phase = state.PhasePR
+	pr := &gh.PR{Number: 50, URL: "https://github.com/test/repo/pull/50"}
+
+	err := o.phaseWatch(context.Background(), s, testCodeAgent(), pr)
+	if err != nil {
+		t.Fatalf("phaseWatch() error = %v", err)
+	}
+	if notifiedPR != 50 {
+		t.Errorf("notified PR = %d, want 50", notifiedPR)
+	}
+	if notifiedIssue != 8 {
+		t.Errorf("notified issue = %d, want 8", notifiedIssue)
+	}
+}
+
+func TestPhaseWatch_AutoMerge_NotifiesPRMerged(t *testing.T) {
+	t.Parallel()
+	var notifiedPR, notifiedIssue int
+
+	o := baseOrchestrator(t)
+	o.Number = 9
+	o.AutoMerge = true
+	o.Watch = &mockWatch{
+		loop: func(ctx context.Context, codeAgent *agent.CodeAgent, s *state.RunState, cfg *config.Config, display *ui.Display) (*watch.Result, error) {
+			return &watch.Result{Reason: watch.ExitReadyToMerge}, nil
+		},
+	}
+	o.Notify = &mockNotifier{
+		prMerged: func(prNumber, issueNumber int) {
+			notifiedPR = prNumber
+			notifiedIssue = issueNumber
+		},
+	}
+
+	s := state.New(t.TempDir(), "owner", "repo", 9)
+	s.Phase = state.PhasePR
+	pr := &gh.PR{Number: 60, URL: "https://github.com/test/repo/pull/60"}
+
+	err := o.phaseWatch(context.Background(), s, testCodeAgent(), pr)
+	if err != nil {
+		t.Fatalf("phaseWatch() error = %v", err)
+	}
+	if notifiedPR != 60 {
+		t.Errorf("notified PR = %d, want 60", notifiedPR)
+	}
+	if notifiedIssue != 9 {
+		t.Errorf("notified issue = %d, want 9", notifiedIssue)
+	}
+}
+
+func TestRun_Failure_NotifiesRunFailed(t *testing.T) {
+	t.Parallel()
+	var notifiedIssue int
+	var notifiedErr string
+
+	o := baseOrchestrator(t)
+	o.Number = 11
+	o.GH = &mockGH{
+		fetchIssue: func(ctx context.Context, owner, repo string, number int) (*gh.Issue, error) {
+			return nil, errors.New("network error")
+		},
+	}
+	o.Notify = &mockNotifier{
+		runFailed: func(issueNumber int, errMsg string) {
+			notifiedIssue = issueNumber
+			notifiedErr = errMsg
+		},
+	}
+
+	err := o.Run(context.Background())
+	if err == nil {
+		t.Fatal("Run() expected error, got nil")
+	}
+	if notifiedIssue != 11 {
+		t.Errorf("notified issue = %d, want 11", notifiedIssue)
+	}
+	if notifiedErr == "" {
+		t.Error("notified error message should not be empty")
+	}
+}
+
+func TestRun_Success_NoFailureNotification(t *testing.T) {
+	t.Parallel()
+	failureCalled := false
+
+	o := baseOrchestrator(t)
+	o.Notify = &mockNotifier{
+		runFailed: func(issueNumber int, errMsg string) {
+			failureCalled = true
+		},
+	}
+
+	err := o.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if failureCalled {
+		t.Error("RunFailed should not be called on success")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // init() defaults tests
 // ---------------------------------------------------------------------------
 
@@ -1293,6 +1475,9 @@ func TestInit_SetsDefaults(t *testing.T) {
 	}
 	if o.Backend == nil {
 		t.Error("init() should set Backend default")
+	}
+	if o.Notify == nil {
+		t.Error("init() should set Notify default")
 	}
 }
 

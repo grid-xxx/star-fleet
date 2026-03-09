@@ -9,6 +9,7 @@ import (
 	"github.com/nullne/star-fleet/internal/config"
 	"github.com/nullne/star-fleet/internal/gh"
 	"github.com/nullne/star-fleet/internal/git"
+	"github.com/nullne/star-fleet/internal/notify"
 	"github.com/nullne/star-fleet/internal/state"
 	"github.com/nullne/star-fleet/internal/ui"
 	"github.com/nullne/star-fleet/internal/watch"
@@ -120,6 +121,7 @@ type Orchestrator struct {
 	State   StateManager
 	Watch   WatchRunner
 	Backend BackendFactory
+	Notify  notify.Notifier
 }
 
 func (o *Orchestrator) init() {
@@ -138,10 +140,23 @@ func (o *Orchestrator) init() {
 	if o.Backend == nil {
 		o.Backend = defaultBackendFactory{}
 	}
+	if o.Notify == nil {
+		if o.Config != nil {
+			o.Notify = notify.New(o.Config.Telegram.BotToken, o.Config.Telegram.ChatID)
+		} else {
+			o.Notify = notify.Nop{}
+		}
+	}
 }
 
-func (o *Orchestrator) Run(ctx context.Context) error {
+func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 	o.init()
+
+	defer func() {
+		if runErr != nil {
+			o.Notify.RunFailed(o.Number, runErr.Error())
+		}
+	}()
 
 	s, err := o.loadState()
 	if err != nil {
@@ -373,6 +388,8 @@ func (o *Orchestrator) phasePR(ctx context.Context, s *state.RunState, codeAgent
 	}
 	o.Display.Step(fmt.Sprintf("PR #%d", pr.Number), pr.URL)
 
+	o.Notify.PRCreated(pr.Number, o.Number, issue.Title)
+
 	s.PR = &state.PRInfo{Number: pr.Number, URL: pr.URL}
 	if err := s.Advance(state.PhasePR); err != nil {
 		return nil, err
@@ -419,6 +436,7 @@ func (o *Orchestrator) phaseWatch(ctx context.Context, s *state.RunState, codeAg
 	switch result.Reason {
 	case watch.ExitMerged:
 		o.Display.Success(fmt.Sprintf("PR #%d merged — done!", pr.Number))
+		o.Notify.PRMerged(pr.Number, o.Number)
 	case watch.ExitClosed:
 		o.Display.Warn(fmt.Sprintf("PR #%d closed without merge", pr.Number))
 	case watch.ExitTimeout:
@@ -434,6 +452,7 @@ func (o *Orchestrator) phaseWatch(ctx context.Context, s *state.RunState, codeAg
 			return fmt.Errorf("auto-merge PR #%d: %w", pr.Number, err)
 		}
 		o.Display.Success(fmt.Sprintf("PR #%d squash-merged!", pr.Number))
+		o.Notify.PRMerged(pr.Number, o.Number)
 	}
 
 	return s.Advance(state.PhaseDone)
