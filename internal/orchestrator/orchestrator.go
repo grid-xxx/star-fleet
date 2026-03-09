@@ -20,7 +20,7 @@ type GHClient interface {
 	PostComment(ctx context.Context, owner, repo string, number int, body string) error
 	DefaultBranch(ctx context.Context, owner, repo string) (string, error)
 	FindPR(ctx context.Context, owner, repo, head string) (*gh.PR, error)
-	CreatePR(ctx context.Context, workdir, title, body, base, head string) (*gh.PR, error)
+	CreatePR(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*gh.PR, error)
 }
 
 // GitClient abstracts git operations for testing.
@@ -62,8 +62,8 @@ func (defaultGH) DefaultBranch(ctx context.Context, owner, repo string) (string,
 func (defaultGH) FindPR(ctx context.Context, owner, repo, head string) (*gh.PR, error) {
 	return gh.FindPR(ctx, owner, repo, head)
 }
-func (defaultGH) CreatePR(ctx context.Context, workdir, title, body, base, head string) (*gh.PR, error) {
-	return gh.CreatePR(ctx, workdir, title, body, base, head)
+func (defaultGH) CreatePR(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*gh.PR, error) {
+	return gh.CreatePR(ctx, owner, repo, workdir, title, body, base, head)
 }
 
 type defaultGit struct{}
@@ -385,7 +385,7 @@ func (o *Orchestrator) findOrCreatePR(ctx context.Context, workdir, title, body,
 	if existing != nil {
 		return existing, nil
 	}
-	return o.GH.CreatePR(ctx, workdir, title, body, base, head)
+	return o.GH.CreatePR(ctx, o.Owner, o.Repo, workdir, title, body, base, head)
 }
 
 // ---------------------------------------------------------------------------

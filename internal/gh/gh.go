@@ -95,8 +95,10 @@ func PostComment(ctx context.Context, owner, repo string, number int, body strin
 	return err
 }
 
-func CreatePR(ctx context.Context, repoDir, title, body, base, head string) (*PR, error) {
-	out, err := run(ctx, repoDir, "pr", "create",
+func CreatePR(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*PR, error) {
+	nwo := owner + "/" + repo
+	out, err := run(ctx, workdir, "pr", "create",
+		"--repo", nwo,
 		"--title", title,
 		"--body", body,
 		"--base", base,
