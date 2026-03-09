@@ -166,8 +166,8 @@ func MergePR(ctx context.Context, owner, repo string, prNumber int) error {
 	nwo := owner + "/" + repo
 	_, err := run(ctx, "", "pr", "merge", strconv.Itoa(prNumber),
 		"--repo", nwo,
-		"--merge",
-		"--delete-branch=false")
+		"--squash",
+		"--delete-branch")
 	return err
 }
 

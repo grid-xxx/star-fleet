@@ -21,6 +21,7 @@ type GHClient interface {
 	DefaultBranch(ctx context.Context, owner, repo string) (string, error)
 	FindPR(ctx context.Context, owner, repo, head string) (*gh.PR, error)
 	CreatePR(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*gh.PR, error)
+	MergePR(ctx context.Context, owner, repo string, number int) error
 }
 
 // GitClient abstracts git operations for testing.
@@ -65,6 +66,9 @@ func (defaultGH) FindPR(ctx context.Context, owner, repo, head string) (*gh.PR, 
 func (defaultGH) CreatePR(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*gh.PR, error) {
 	return gh.CreatePR(ctx, owner, repo, workdir, title, body, base, head)
 }
+func (defaultGH) MergePR(ctx context.Context, owner, repo string, number int) error {
+	return gh.MergePR(ctx, owner, repo, number)
+}
 
 type defaultGit struct{}
 
@@ -107,8 +111,9 @@ type Orchestrator struct {
 	Config   *config.Config
 	Display  *ui.Display
 	RepoRoot string
-	Restart  bool // when true, discard existing state and start fresh
-	NoWatch  bool // when true, skip the watch loop after creating PR
+	Restart   bool // when true, discard existing state and start fresh
+	NoWatch   bool // when true, skip the watch loop after creating PR
+	AutoMerge bool // when true, auto-merge PR when CI passes
 
 	GH      GHClient
 	Git     GitClient
@@ -405,6 +410,7 @@ func (o *Orchestrator) phaseWatch(ctx context.Context, s *state.RunState, codeAg
 
 	o.Display.Info(fmt.Sprintf("Entering watch loop for PR #%d", pr.Number))
 
+	o.Config.Watch.AutoMerge = o.AutoMerge
 	result, err := o.Watch.Loop(ctx, codeAgent, s, o.Config, o.Display)
 	if err != nil {
 		return fmt.Errorf("watch loop: %w", err)
@@ -421,6 +427,13 @@ func (o *Orchestrator) phaseWatch(ctx context.Context, s *state.RunState, codeAg
 		o.Display.Warn("Watch loop exited due to inactivity")
 	case watch.ExitMaxFix:
 		o.Display.Warn("Watch loop exited — max fix rounds reached")
+	case watch.ExitReadyToMerge:
+		o.Display.Info(fmt.Sprintf("Auto-merging PR #%d...", pr.Number))
+		if err := o.GH.MergePR(ctx, o.Owner, o.Repo, pr.Number); err != nil {
+			o.Display.Warn(fmt.Sprintf("Auto-merge failed: %v", err))
+			return fmt.Errorf("auto-merge PR #%d: %w", pr.Number, err)
+		}
+		o.Display.Success(fmt.Sprintf("PR #%d squash-merged!", pr.Number))
 	}
 
 	return s.Advance(state.PhaseDone)

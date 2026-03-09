@@ -16,11 +16,12 @@ import (
 type ExitReason int
 
 const (
-	ExitMerged  ExitReason = iota // PR was merged
-	ExitClosed                    // PR was closed without merging
-	ExitTimeout                   // Total watch timeout exceeded
-	ExitIdle                      // No new events for idle_timeout
-	ExitMaxFix                    // Max fix rounds reached
+	ExitMerged       ExitReason = iota // PR was merged
+	ExitClosed                         // PR was closed without merging
+	ExitTimeout                        // Total watch timeout exceeded
+	ExitIdle                           // No new events for idle_timeout
+	ExitMaxFix                         // Max fix rounds reached
+	ExitReadyToMerge                   // CI passed, no pending tasks, auto-merge eligible
 )
 
 func (r ExitReason) String() string {
@@ -35,6 +36,8 @@ func (r ExitReason) String() string {
 		return "idle timeout"
 	case ExitMaxFix:
 		return "max fix rounds"
+	case ExitReadyToMerge:
+		return "ready to merge"
 	default:
 		return "unknown"
 	}
@@ -106,6 +109,14 @@ func Loop(ctx context.Context, codeAgent *agent.CodeAgent, s *state.RunState, cf
 		}
 
 		// Process events
+		hasActionable := false
+		for _, event := range events {
+			if event.Type == EventComment || event.Type == EventReview || event.Type == EventCIFail {
+				hasActionable = true
+				break
+			}
+		}
+
 		for _, event := range events {
 			// Terminal events
 			if event.Type == EventMerged {
@@ -117,11 +128,17 @@ func Loop(ctx context.Context, codeAgent *agent.CodeAgent, s *state.RunState, cf
 				return &Result{Reason: ExitClosed}, nil
 			}
 
-			// CI pass — just log it
+			// CI pass
 			if event.Type == EventCIPass {
 				display.Step("CI", "all checks passed")
 				s.RecordEvent(event.ID)
 				_ = s.Save()
+
+				if cfg.Watch.AutoMerge && !hasActionable {
+					display.Success("CI passed — ready to merge")
+					return &Result{Reason: ExitReadyToMerge}, nil
+				}
+
 				_ = gh.PostComment(ctx, owner, repo, prNumber,
 					"## ✅ Star Fleet — CI Passed\n\nAll CI checks have passed.")
 				continue
