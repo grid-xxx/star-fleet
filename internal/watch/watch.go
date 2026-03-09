@@ -69,6 +69,29 @@ func Loop(ctx context.Context, codeAgent *agent.CodeAgent, s *state.RunState, cf
 
 	display.Info(fmt.Sprintf("Watching PR #%d (poll: %s, timeout: %s)", prNumber, pollInterval, timeout))
 
+	// Initial check: if AutoMerge is enabled and CI is already green with no
+	// pending actionable events, exit immediately. This handles the case where
+	// CI finishes before the watch loop starts or when resuming after a crash.
+	if cfg.Watch.AutoMerge && cfg.CI.Enabled {
+		ciStatus, err := gh.CheckCIStatus(ctx, owner, repo, prNumber)
+		if err == nil && ciStatus.AllGreen {
+			events, err := PollEvents(ctx, owner, repo, prNumber, s, cfg.CI.Enabled)
+			if err == nil {
+				hasActionable := false
+				for _, event := range events {
+					if event.Type == EventComment || event.Type == EventReview || event.Type == EventCIFail {
+						hasActionable = true
+						break
+					}
+				}
+				if !hasActionable {
+					display.Success("CI already green — ready to merge")
+					return &Result{Reason: ExitReadyToMerge}, nil
+				}
+			}
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
