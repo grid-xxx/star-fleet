@@ -5,6 +5,7 @@ go 1.26
 require (
 	github.com/BurntSushi/toml v1.4.0
 	github.com/charmbracelet/lipgloss v1.0.0
+	github.com/creack/pty v1.1.24
 	github.com/spf13/cobra v1.8.1
 )
 
