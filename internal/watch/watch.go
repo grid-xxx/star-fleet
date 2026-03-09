@@ -188,6 +188,18 @@ func Loop(ctx context.Context, codeAgent *agent.CodeAgent, s *state.RunState, cf
 			}
 		}
 
+		// Fallback: if auto-merge is enabled and no actionable events were found
+		// in this batch, check CI status directly. This catches the case where CI
+		// passes but the EventCIPass was already recorded (e.g., consumed by the
+		// initial check) or the event ID shifted between polls.
+		if cfg.Watch.AutoMerge && cfg.CI.Enabled && !hasActionable {
+			ciStatus, err := gh.CheckCIStatus(ctx, owner, repo, prNumber)
+			if err == nil && ciStatus.AllGreen {
+				display.Success("CI passed — ready to merge")
+				return &Result{Reason: ExitReadyToMerge}, nil
+			}
+		}
+
 		// Wait before next poll
 		select {
 		case <-ctx.Done():
