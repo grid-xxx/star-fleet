@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -16,15 +15,8 @@ func (c *ClaudeBackend) Run(ctx context.Context, workdir string, prompt string, 
 		"--dangerously-skip-permissions",
 	)
 	cmd.Dir = workdir
-	var stderr bytes.Buffer
-	if output != nil {
-		cmd.Stdout = output
-		cmd.Stderr = io.MultiWriter(&stderr, output)
-	} else {
-		cmd.Stderr = &stderr
-	}
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("claude-code: %s: %w", stderr.String(), err)
+	if err := runWithPTY(cmd, output); err != nil {
+		return fmt.Errorf("claude-code: %w", err)
 	}
 	return nil
 }
