@@ -61,7 +61,7 @@ type CheckRun struct {
 }
 
 func CurrentRepo(ctx context.Context) (*RepoInfo, error) {
-	out, err := run(ctx, "", "repo", "view", "--json", "owner,name", "-q", ".owner + \"/\" + .name")
+	out, err := runFn(ctx, "", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")
 	if err != nil {
 		return nil, fmt.Errorf("detecting repo: %w", err)
 	}
@@ -298,6 +298,10 @@ func GetCheckRunLogs(ctx context.Context, owner, repo string, checkRun CheckRun)
 	}
 	return fmt.Sprintf("Check %q failed:\n%s", checkRun.Name, strings.TrimSpace(out))
 }
+
+// runFn is the function used to execute gh commands.
+// It can be overridden in tests to avoid shelling out.
+var runFn = run
 
 func run(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "gh", args...)
