@@ -25,7 +25,7 @@ type mockGH struct {
 	postComment   func(ctx context.Context, owner, repo string, number int, body string) error
 	defaultBranch func(ctx context.Context, owner, repo string) (string, error)
 	findPR        func(ctx context.Context, owner, repo, head string) (*gh.PR, error)
-	createPR      func(ctx context.Context, workdir, title, body, base, head string) (*gh.PR, error)
+	createPR      func(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*gh.PR, error)
 }
 
 func (m *mockGH) FetchIssue(ctx context.Context, owner, repo string, number int) (*gh.Issue, error) {
@@ -52,9 +52,9 @@ func (m *mockGH) FindPR(ctx context.Context, owner, repo, head string) (*gh.PR, 
 	}
 	return nil, nil
 }
-func (m *mockGH) CreatePR(ctx context.Context, workdir, title, body, base, head string) (*gh.PR, error) {
+func (m *mockGH) CreatePR(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*gh.PR, error) {
 	if m.createPR != nil {
-		return m.createPR(ctx, workdir, title, body, base, head)
+		return m.createPR(ctx, owner, repo, workdir, title, body, base, head)
 	}
 	return &gh.PR{Number: 42, URL: "https://github.com/test/repo/pull/42"}, nil
 }
@@ -613,13 +613,15 @@ func TestPhasePR_PRAlreadyExists(t *testing.T) {
 
 func TestPhasePR_CreatesFreshPR(t *testing.T) {
 	t.Parallel()
-	var capturedTitle, capturedBody string
+	var capturedOwner, capturedRepo, capturedTitle, capturedBody string
 	o := baseOrchestrator(t)
 	o.GH = &mockGH{
 		findPR: func(ctx context.Context, owner, repo, head string) (*gh.PR, error) {
 			return nil, nil
 		},
-		createPR: func(ctx context.Context, workdir, title, body, base, head string) (*gh.PR, error) {
+		createPR: func(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*gh.PR, error) {
+			capturedOwner = owner
+			capturedRepo = repo
 			capturedTitle = title
 			capturedBody = body
 			return &gh.PR{Number: 42, URL: "https://github.com/test/repo/pull/42"}, nil
@@ -638,6 +640,12 @@ func TestPhasePR_CreatesFreshPR(t *testing.T) {
 	if pr.Number != 42 {
 		t.Errorf("phasePR() PR number = %d, want 42", pr.Number)
 	}
+	if capturedOwner != "owner" {
+		t.Errorf("CreatePR owner = %q, want %q", capturedOwner, "owner")
+	}
+	if capturedRepo != "repo" {
+		t.Errorf("CreatePR repo = %q, want %q", capturedRepo, "repo")
+	}
 	if !strings.Contains(capturedTitle, "Add feature") {
 		t.Errorf("PR title = %q, want to contain 'Add feature'", capturedTitle)
 	}
@@ -653,7 +661,7 @@ func TestPhasePR_CreatePRFails(t *testing.T) {
 		findPR: func(ctx context.Context, owner, repo, head string) (*gh.PR, error) {
 			return nil, nil
 		},
-		createPR: func(ctx context.Context, workdir, title, body, base, head string) (*gh.PR, error) {
+		createPR: func(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*gh.PR, error) {
 			return nil, errors.New("pr creation failed")
 		},
 	}
@@ -681,7 +689,7 @@ func TestFindOrCreatePR_ExistingPR(t *testing.T) {
 		findPR: func(ctx context.Context, owner, repo, head string) (*gh.PR, error) {
 			return &gh.PR{Number: 10, URL: "https://github.com/test/repo/pull/10"}, nil
 		},
-		createPR: func(ctx context.Context, workdir, title, body, base, head string) (*gh.PR, error) {
+		createPR: func(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*gh.PR, error) {
 			t.Error("CreatePR should not be called when PR already exists")
 			return nil, nil
 		},
@@ -704,7 +712,7 @@ func TestFindOrCreatePR_NoExistingPR(t *testing.T) {
 		findPR: func(ctx context.Context, owner, repo, head string) (*gh.PR, error) {
 			return nil, nil
 		},
-		createPR: func(ctx context.Context, workdir, title, body, base, head string) (*gh.PR, error) {
+		createPR: func(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*gh.PR, error) {
 			created = true
 			return &gh.PR{Number: 50, URL: "https://github.com/test/repo/pull/50"}, nil
 		},
@@ -719,6 +727,35 @@ func TestFindOrCreatePR_NoExistingPR(t *testing.T) {
 	}
 	if pr.Number != 50 {
 		t.Errorf("findOrCreatePR() PR number = %d, want 50", pr.Number)
+	}
+}
+
+func TestFindOrCreatePR_PassesOwnerRepo(t *testing.T) {
+	t.Parallel()
+	var capturedOwner, capturedRepo string
+	o := baseOrchestrator(t)
+	o.Owner = "my-org"
+	o.Repo = "my-repo"
+	o.GH = &mockGH{
+		findPR: func(ctx context.Context, owner, repo, head string) (*gh.PR, error) {
+			return nil, nil
+		},
+		createPR: func(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*gh.PR, error) {
+			capturedOwner = owner
+			capturedRepo = repo
+			return &gh.PR{Number: 55, URL: "https://github.com/my-org/my-repo/pull/55"}, nil
+		},
+	}
+
+	_, err := o.findOrCreatePR(context.Background(), "/tmp", "title", "body", "main", "fleet/1")
+	if err != nil {
+		t.Fatalf("findOrCreatePR() error = %v", err)
+	}
+	if capturedOwner != "my-org" {
+		t.Errorf("CreatePR owner = %q, want %q", capturedOwner, "my-org")
+	}
+	if capturedRepo != "my-repo" {
+		t.Errorf("CreatePR repo = %q, want %q", capturedRepo, "my-repo")
 	}
 }
 
