@@ -10,10 +10,11 @@ import (
 )
 
 type Config struct {
-	Agent AgentConfig `toml:"agent"`
-	Watch WatchConfig `toml:"watch"`
-	CI    CIConfig    `toml:"ci"`
-	Test  TestConfig  `toml:"test"`
+	Agent    AgentConfig    `toml:"agent"`
+	Watch    WatchConfig    `toml:"watch"`
+	CI       CIConfig       `toml:"ci"`
+	Test     TestConfig     `toml:"test"`
+	Telegram TelegramConfig `toml:"telegram"`
 }
 
 type AgentConfig struct {
@@ -35,6 +36,11 @@ type CIConfig struct {
 
 type TestConfig struct {
 	Command string `toml:"command"`
+}
+
+type TelegramConfig struct {
+	BotToken string `toml:"bot_token"`
+	ChatID   string `toml:"chat_id"`
 }
 
 // Duration wraps time.Duration to support TOML string parsing (e.g. "30s", "2h").
@@ -74,14 +80,20 @@ func Load(repoRoot string) (*Config, error) {
 	path := filepath.Join(repoRoot, ".fleet", "config.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return &cfg, nil
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("reading config: %w", err)
 		}
-		return nil, fmt.Errorf("reading config: %w", err)
+	} else {
+		if _, err := toml.Decode(string(data), &cfg); err != nil {
+			return nil, fmt.Errorf("parsing config %s: %w", path, err)
+		}
 	}
 
-	if _, err := toml.Decode(string(data), &cfg); err != nil {
-		return nil, fmt.Errorf("parsing config %s: %w", path, err)
+	if v := os.Getenv("FLEET_TELEGRAM_BOT_TOKEN"); v != "" {
+		cfg.Telegram.BotToken = v
+	}
+	if v := os.Getenv("FLEET_TELEGRAM_CHAT_ID"); v != "" {
+		cfg.Telegram.ChatID = v
 	}
 
 	switch cfg.Agent.Backend {
