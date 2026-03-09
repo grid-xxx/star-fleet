@@ -190,6 +190,28 @@ func GetPRDiff(ctx context.Context, owner, repo string, prNumber int) (string, e
 	return runFn(ctx, "", "pr", "diff", strconv.Itoa(prNumber), "--repo", nwo)
 }
 
+// SubmitReview submits a pull request review with the given event and body.
+// event must be "APPROVE", "REQUEST_CHANGES", or "COMMENT".
+func SubmitReview(ctx context.Context, owner, repo string, prNumber int, event, body string) error {
+	nwo := owner + "/" + repo
+	var flag string
+	switch event {
+	case "APPROVE":
+		flag = "--approve"
+	case "REQUEST_CHANGES":
+		flag = "--request-changes"
+	case "COMMENT":
+		flag = "--comment"
+	default:
+		return fmt.Errorf("unknown review event %q", event)
+	}
+	_, err := runFn(ctx, "", "pr", "review", strconv.Itoa(prNumber),
+		"--repo", nwo,
+		flag,
+		"--body", body)
+	return err
+}
+
 func DefaultBranch(ctx context.Context, owner, repo string) (string, error) {
 	nwo := owner + "/" + repo
 	out, err := runFn(ctx, "", "repo", "view", nwo, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name")

@@ -27,6 +27,8 @@ type mockGH struct {
 	findPR        func(ctx context.Context, owner, repo, head string) (*gh.PR, error)
 	createPR      func(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*gh.PR, error)
 	mergePR       func(ctx context.Context, owner, repo string, number int) error
+	getPRDiff     func(ctx context.Context, owner, repo string, prNumber int) (string, error)
+	submitReview  func(ctx context.Context, owner, repo string, prNumber int, event, body string) error
 }
 
 func (m *mockGH) FetchIssue(ctx context.Context, owner, repo string, number int) (*gh.Issue, error) {
@@ -62,6 +64,18 @@ func (m *mockGH) CreatePR(ctx context.Context, owner, repo, workdir, title, body
 func (m *mockGH) MergePR(ctx context.Context, owner, repo string, number int) error {
 	if m.mergePR != nil {
 		return m.mergePR(ctx, owner, repo, number)
+	}
+	return nil
+}
+func (m *mockGH) GetPRDiff(ctx context.Context, owner, repo string, prNumber int) (string, error) {
+	if m.getPRDiff != nil {
+		return m.getPRDiff(ctx, owner, repo, prNumber)
+	}
+	return "+some diff", nil
+}
+func (m *mockGH) SubmitReview(ctx context.Context, owner, repo string, prNumber int, event, body string) error {
+	if m.submitReview != nil {
+		return m.submitReview(ctx, owner, repo, prNumber, event, body)
 	}
 	return nil
 }
@@ -131,6 +145,17 @@ func (m *mockBackendFactory) NewBackend(name string) (agent.Backend, error) {
 	return &noopBackend{}, nil
 }
 
+type mockReviewer struct {
+	review func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error)
+}
+
+func (m *mockReviewer) Review(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+	if m.review != nil {
+		return m.review(ctx, owner, repo, prNumber, cfg)
+	}
+	return 0, nil
+}
+
 type noopBackend struct{}
 
 func (noopBackend) Run(ctx context.Context, workdir string, prompt string, output io.Writer) error {
@@ -169,8 +194,9 @@ func testDisplay() *ui.Display {
 
 func testConfig() *config.Config {
 	return &config.Config{
-		Agent: config.AgentConfig{Backend: "mock"},
-		Watch: config.WatchConfig{MaxFixRounds: 5},
+		Agent:  config.AgentConfig{Backend: "mock"},
+		Review: config.ReviewConfig{Enabled: true, MaxRounds: 3},
+		Watch:  config.WatchConfig{MaxFixRounds: 5},
 	}
 }
 
@@ -188,6 +214,7 @@ func baseOrchestrator(t *testing.T) *Orchestrator {
 		State:    &mockState{},
 		Watch:    &mockWatch{},
 		Backend:  &mockBackendFactory{},
+		Reviewer: &mockReviewer{},
 		Notify:   &mockNotifier{},
 	}
 }
@@ -1489,6 +1516,349 @@ func TestInit_PreservesOverrides(t *testing.T) {
 
 	if o.GH != customGH {
 		t.Error("init() should not overwrite existing GH")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// phaseReview tests
+// ---------------------------------------------------------------------------
+
+func TestPhaseReview_AlreadyPast(t *testing.T) {
+	t.Parallel()
+	o := baseOrchestrator(t)
+	o.Reviewer = &mockReviewer{
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+			t.Error("Review should not be called when already past review")
+			return 0, nil
+		},
+	}
+
+	s := state.New(t.TempDir(), "owner", "repo", 1)
+	s.Phase = state.PhaseWatch
+
+	pr := &gh.PR{Number: 42, URL: "https://github.com/test/repo/pull/42"}
+	err := o.phaseReview(context.Background(), s, testCodeAgent(), pr)
+	if err != nil {
+		t.Fatalf("phaseReview() error = %v", err)
+	}
+}
+
+func TestPhaseReview_Disabled(t *testing.T) {
+	t.Parallel()
+	reviewCalled := false
+	o := baseOrchestrator(t)
+	o.Config.Review.Enabled = false
+	o.Reviewer = &mockReviewer{
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+			reviewCalled = true
+			return 0, nil
+		},
+	}
+
+	s := state.New(t.TempDir(), "owner", "repo", 1)
+	s.Phase = state.PhasePR
+	pr := &gh.PR{Number: 42, URL: "https://github.com/test/repo/pull/42"}
+
+	err := o.phaseReview(context.Background(), s, testCodeAgent(), pr)
+	if err != nil {
+		t.Fatalf("phaseReview() error = %v", err)
+	}
+	if reviewCalled {
+		t.Error("Review should not be called when disabled")
+	}
+	if s.Phase != state.PhaseReview {
+		t.Errorf("state phase = %v, want %v", s.Phase, state.PhaseReview)
+	}
+}
+
+func TestPhaseReview_NoReviewFlag(t *testing.T) {
+	t.Parallel()
+	reviewCalled := false
+	o := baseOrchestrator(t)
+	o.NoReview = true
+	o.Reviewer = &mockReviewer{
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+			reviewCalled = true
+			return 0, nil
+		},
+	}
+
+	s := state.New(t.TempDir(), "owner", "repo", 1)
+	s.Phase = state.PhasePR
+	pr := &gh.PR{Number: 42, URL: "https://github.com/test/repo/pull/42"}
+
+	err := o.phaseReview(context.Background(), s, testCodeAgent(), pr)
+	if err != nil {
+		t.Fatalf("phaseReview() error = %v", err)
+	}
+	if reviewCalled {
+		t.Error("Review should not be called with --no-review")
+	}
+	if s.Phase != state.PhaseReview {
+		t.Errorf("state phase = %v, want %v", s.Phase, state.PhaseReview)
+	}
+}
+
+func TestPhaseReview_ApprovedFirstRound(t *testing.T) {
+	t.Parallel()
+	o := baseOrchestrator(t)
+	o.Reviewer = &mockReviewer{
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+			return 0, nil
+		},
+	}
+
+	s := state.New(t.TempDir(), "owner", "repo", 1)
+	s.Phase = state.PhasePR
+	pr := &gh.PR{Number: 42, URL: "https://github.com/test/repo/pull/42"}
+
+	err := o.phaseReview(context.Background(), s, testCodeAgent(), pr)
+	if err != nil {
+		t.Fatalf("phaseReview() error = %v", err)
+	}
+	if s.Phase != state.PhaseReview {
+		t.Errorf("state phase = %v, want %v", s.Phase, state.PhaseReview)
+	}
+	if s.ReviewRound != 1 {
+		t.Errorf("review round = %d, want 1", s.ReviewRound)
+	}
+}
+
+func TestPhaseReview_FixAndApproveSecondRound(t *testing.T) {
+	t.Parallel()
+	round := 0
+	var pushed bool
+
+	o := baseOrchestrator(t)
+	o.Reviewer = &mockReviewer{
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+			round++
+			if round == 1 {
+				return 2, nil
+			}
+			return 0, nil
+		},
+	}
+	o.Git = &mockGit{
+		push: func(ctx context.Context, dir, remote, branch string) error {
+			pushed = true
+			return nil
+		},
+	}
+
+	s := state.New(t.TempDir(), "owner", "repo", 1)
+	s.Phase = state.PhasePR
+	pr := &gh.PR{Number: 42, URL: "https://github.com/test/repo/pull/42"}
+
+	err := o.phaseReview(context.Background(), s, testCodeAgent(), pr)
+	if err != nil {
+		t.Fatalf("phaseReview() error = %v", err)
+	}
+	if s.Phase != state.PhaseReview {
+		t.Errorf("state phase = %v, want %v", s.Phase, state.PhaseReview)
+	}
+	if s.ReviewRound != 2 {
+		t.Errorf("review round = %d, want 2", s.ReviewRound)
+	}
+	if !pushed {
+		t.Error("should have pushed after fixing review issues")
+	}
+}
+
+func TestPhaseReview_MaxRoundsReached(t *testing.T) {
+	t.Parallel()
+	reviewCount := 0
+
+	o := baseOrchestrator(t)
+	o.Config.Review.MaxRounds = 2
+	o.Reviewer = &mockReviewer{
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+			reviewCount++
+			return 3, nil
+		},
+	}
+
+	s := state.New(t.TempDir(), "owner", "repo", 1)
+	s.Phase = state.PhasePR
+	pr := &gh.PR{Number: 42, URL: "https://github.com/test/repo/pull/42"}
+
+	err := o.phaseReview(context.Background(), s, testCodeAgent(), pr)
+	if err != nil {
+		t.Fatalf("phaseReview() error = %v", err)
+	}
+	if s.Phase != state.PhaseReview {
+		t.Errorf("state phase = %v, want %v", s.Phase, state.PhaseReview)
+	}
+	if reviewCount != 2 {
+		t.Errorf("review count = %d, want 2", reviewCount)
+	}
+}
+
+func TestPhaseReview_ReviewError(t *testing.T) {
+	t.Parallel()
+	o := baseOrchestrator(t)
+	o.Reviewer = &mockReviewer{
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+			return 0, errors.New("review agent crashed")
+		},
+	}
+
+	s := state.New(t.TempDir(), "owner", "repo", 1)
+	s.Phase = state.PhasePR
+	pr := &gh.PR{Number: 42, URL: "https://github.com/test/repo/pull/42"}
+
+	err := o.phaseReview(context.Background(), s, testCodeAgent(), pr)
+	if err == nil {
+		t.Fatal("phaseReview() expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "review round 1") {
+		t.Errorf("expected 'review round 1' in error, got %v", err)
+	}
+}
+
+func TestPhaseReview_FixPushError(t *testing.T) {
+	t.Parallel()
+	o := baseOrchestrator(t)
+	o.Reviewer = &mockReviewer{
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+			return 1, nil
+		},
+	}
+	o.Git = &mockGit{
+		push: func(ctx context.Context, dir, remote, branch string) error {
+			return errors.New("push failed")
+		},
+	}
+
+	s := state.New(t.TempDir(), "owner", "repo", 1)
+	s.Phase = state.PhasePR
+	pr := &gh.PR{Number: 42, URL: "https://github.com/test/repo/pull/42"}
+
+	err := o.phaseReview(context.Background(), s, testCodeAgent(), pr)
+	if err == nil {
+		t.Fatal("phaseReview() expected push error, got nil")
+	}
+	if !strings.Contains(err.Error(), "pushing review fixes") {
+		t.Errorf("expected 'pushing review fixes' in error, got %v", err)
+	}
+}
+
+func TestPhaseReview_PostsGitHubComments(t *testing.T) {
+	t.Parallel()
+	var comments []string
+
+	o := baseOrchestrator(t)
+	o.GH = &mockGH{
+		postComment: func(ctx context.Context, owner, repo string, number int, body string) error {
+			comments = append(comments, body)
+			return nil
+		},
+	}
+	o.Reviewer = &mockReviewer{
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+			return 0, nil
+		},
+	}
+
+	s := state.New(t.TempDir(), "owner", "repo", 1)
+	s.Phase = state.PhasePR
+	pr := &gh.PR{Number: 42, URL: "https://github.com/test/repo/pull/42"}
+
+	err := o.phaseReview(context.Background(), s, testCodeAgent(), pr)
+	if err != nil {
+		t.Fatalf("phaseReview() error = %v", err)
+	}
+
+	if len(comments) == 0 {
+		t.Error("should post at least one GitHub comment")
+	}
+	if !strings.Contains(comments[0], "Reviewing PR") {
+		t.Errorf("first comment = %q, want to contain 'Reviewing PR'", comments[0])
+	}
+}
+
+func TestRun_ResumeFromReview(t *testing.T) {
+	t.Parallel()
+	o := baseOrchestrator(t)
+	o.State = &mockState{
+		load: func(repoRoot string, number int) (*state.RunState, error) {
+			s := state.New(t.TempDir(), "owner", "repo", 1)
+			s.Phase = state.PhaseReview
+			s.BaseBranch = "main"
+			s.PR = &state.PRInfo{Number: 42, URL: "https://github.com/test/repo/pull/42"}
+			return s, nil
+		},
+	}
+
+	err := o.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestRun_NoReviewFlag(t *testing.T) {
+	t.Parallel()
+	reviewCalled := false
+	o := baseOrchestrator(t)
+	o.NoReview = true
+	o.Reviewer = &mockReviewer{
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+			reviewCalled = true
+			return 0, nil
+		},
+	}
+
+	err := o.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if reviewCalled {
+		t.Error("Run(noReview=true) should not call Reviewer.Review")
+	}
+}
+
+func TestRun_ReviewOnly(t *testing.T) {
+	t.Parallel()
+	reviewCalled := false
+	o := baseOrchestrator(t)
+	o.ReviewOnly = true
+	o.GH = &mockGH{
+		findPR: func(ctx context.Context, owner, repo, head string) (*gh.PR, error) {
+			return &gh.PR{Number: 42, URL: "https://github.com/test/repo/pull/42"}, nil
+		},
+	}
+	o.Reviewer = &mockReviewer{
+		review: func(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+			reviewCalled = true
+			return 0, nil
+		},
+	}
+
+	err := o.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !reviewCalled {
+		t.Error("Run(reviewOnly=true) should call Reviewer.Review")
+	}
+}
+
+func TestRun_ReviewOnly_NoPR(t *testing.T) {
+	t.Parallel()
+	o := baseOrchestrator(t)
+	o.ReviewOnly = true
+	o.GH = &mockGH{
+		findPR: func(ctx context.Context, owner, repo, head string) (*gh.PR, error) {
+			return nil, nil
+		},
+	}
+
+	err := o.Run(context.Background())
+	if err == nil {
+		t.Fatal("Run() expected error for review-only with no PR")
+	}
+	if !strings.Contains(err.Error(), "no open PR found") {
+		t.Errorf("expected 'no open PR found' error, got %v", err)
 	}
 }
 

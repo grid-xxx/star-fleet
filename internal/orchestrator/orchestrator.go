@@ -10,6 +10,7 @@ import (
 	"github.com/nullne/star-fleet/internal/gh"
 	"github.com/nullne/star-fleet/internal/git"
 	"github.com/nullne/star-fleet/internal/notify"
+	"github.com/nullne/star-fleet/internal/review"
 	"github.com/nullne/star-fleet/internal/state"
 	"github.com/nullne/star-fleet/internal/ui"
 	"github.com/nullne/star-fleet/internal/watch"
@@ -23,6 +24,13 @@ type GHClient interface {
 	FindPR(ctx context.Context, owner, repo, head string) (*gh.PR, error)
 	CreatePR(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*gh.PR, error)
 	MergePR(ctx context.Context, owner, repo string, number int) error
+	GetPRDiff(ctx context.Context, owner, repo string, prNumber int) (string, error)
+	SubmitReview(ctx context.Context, owner, repo string, prNumber int, event, body string) error
+}
+
+// ReviewRunner abstracts the review process for testing.
+type ReviewRunner interface {
+	Review(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error)
 }
 
 // GitClient abstracts git operations for testing.
@@ -70,6 +78,12 @@ func (defaultGH) CreatePR(ctx context.Context, owner, repo, workdir, title, body
 func (defaultGH) MergePR(ctx context.Context, owner, repo string, number int) error {
 	return gh.MergePR(ctx, owner, repo, number)
 }
+func (defaultGH) GetPRDiff(ctx context.Context, owner, repo string, prNumber int) (string, error) {
+	return gh.GetPRDiff(ctx, owner, repo, prNumber)
+}
+func (defaultGH) SubmitReview(ctx context.Context, owner, repo string, prNumber int, event, body string) error {
+	return gh.SubmitReview(ctx, owner, repo, prNumber, event, body)
+}
 
 type defaultGit struct{}
 
@@ -98,6 +112,24 @@ func (defaultWatch) Loop(ctx context.Context, codeAgent *agent.CodeAgent, s *sta
 	return watch.Loop(ctx, codeAgent, s, cfg, display)
 }
 
+type defaultReview struct {
+	gh      GHClient
+	backend BackendFactory
+}
+
+func (d defaultReview) Review(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (int, error) {
+	backendName := cfg.Backend
+	if backendName == "" {
+		backendName = "claude-code"
+	}
+	b, err := d.backend.NewBackend(backendName)
+	if err != nil {
+		return 0, err
+	}
+	r := &review.Reviewer{Agent: b, GH: d.gh}
+	return r.Review(ctx, owner, repo, prNumber, cfg)
+}
+
 type defaultBackendFactory struct{}
 
 func (defaultBackendFactory) NewBackend(name string) (agent.Backend, error) {
@@ -106,22 +138,25 @@ func (defaultBackendFactory) NewBackend(name string) (agent.Backend, error) {
 
 // Orchestrator is the core pipeline controller.
 type Orchestrator struct {
-	Owner    string
-	Repo     string
-	Number   int
-	Config   *config.Config
-	Display  *ui.Display
-	RepoRoot string
-	Restart   bool // when true, discard existing state and start fresh
-	NoWatch   bool // when true, skip the watch loop after creating PR
-	AutoMerge bool // when true, auto-merge PR when CI passes
+	Owner      string
+	Repo       string
+	Number     int
+	Config     *config.Config
+	Display    *ui.Display
+	RepoRoot   string
+	Restart    bool // when true, discard existing state and start fresh
+	NoWatch    bool // when true, skip the watch loop after creating PR
+	AutoMerge  bool // when true, auto-merge PR when CI passes
+	NoReview   bool // when true, skip the review phase
+	ReviewOnly bool // when true, only run review on existing PR
 
-	GH      GHClient
-	Git     GitClient
-	State   StateManager
-	Watch   WatchRunner
-	Backend BackendFactory
-	Notify  notify.Notifier
+	GH       GHClient
+	Git      GitClient
+	State    StateManager
+	Watch    WatchRunner
+	Backend  BackendFactory
+	Reviewer ReviewRunner
+	Notify   notify.Notifier
 }
 
 func (o *Orchestrator) init() {
@@ -139,6 +174,9 @@ func (o *Orchestrator) init() {
 	}
 	if o.Backend == nil {
 		o.Backend = defaultBackendFactory{}
+	}
+	if o.Reviewer == nil {
+		o.Reviewer = defaultReview{gh: o.GH, backend: o.Backend}
 	}
 	if o.Notify == nil {
 		if o.Config != nil {
@@ -212,6 +250,26 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		BaseBranch: s.BaseBranch,
 	}
 
+	if o.ReviewOnly {
+		// --review-only: skip implement, find existing PR, run review only
+		pr, err := o.GH.FindPR(ctx, o.Owner, o.Repo, s.Branch)
+		if err != nil {
+			return fmt.Errorf("finding PR for review-only: %w", err)
+		}
+		if pr == nil {
+			return fmt.Errorf("no open PR found for branch %s", s.Branch)
+		}
+		s.PR = &state.PRInfo{Number: pr.Number, URL: pr.URL}
+		o.Display.Step(fmt.Sprintf("PR #%d", pr.Number), pr.URL)
+
+		if err := o.phaseReview(ctx, s, codeAgent, pr); err != nil {
+			return err
+		}
+
+		o.Display.Result(pr.URL)
+		return s.Advance(state.PhaseDone)
+	}
+
 	// === IMPLEMENT (single agent writes code + tests) ===
 	o.Display.Blank()
 	if err := o.phaseImplement(ctx, s, codeAgent); err != nil {
@@ -221,6 +279,11 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 	// === PUSH + CREATE PR ===
 	pr, err := o.phasePR(ctx, s, codeAgent, issue)
 	if err != nil {
+		return err
+	}
+
+	// === REVIEW (automated code review) ===
+	if err := o.phaseReview(ctx, s, codeAgent, pr); err != nil {
 		return err
 	}
 
@@ -408,6 +471,68 @@ func (o *Orchestrator) findOrCreatePR(ctx context.Context, workdir, title, body,
 		return existing, nil
 	}
 	return o.GH.CreatePR(ctx, o.Owner, o.Repo, workdir, title, body, base, head)
+}
+
+// ---------------------------------------------------------------------------
+// Phase: Review (automated code review)
+// ---------------------------------------------------------------------------
+
+func (o *Orchestrator) phaseReview(ctx context.Context, s *state.RunState, codeAgent *agent.CodeAgent, pr *gh.PR) error {
+	if s.Phase.AtLeast(state.PhaseReview) {
+		o.Display.Step("Code Review", "done (cached)")
+		return nil
+	}
+
+	if o.NoReview || !o.Config.Review.Enabled {
+		o.Display.Step("Code Review", "skipped")
+		return s.Advance(state.PhaseReview)
+	}
+
+	maxRounds := o.Config.Review.MaxRounds
+	if maxRounds < 1 {
+		maxRounds = 3
+	}
+
+	_ = o.GH.PostComment(ctx, o.Owner, o.Repo, pr.Number,
+		"🔍 Star Fleet — Reviewing PR...")
+
+	for round := s.ReviewRound + 1; round <= maxRounds; round++ {
+		o.Display.Step("Code Review", fmt.Sprintf("round %d/%d...", round, maxRounds))
+
+		issues, err := o.Reviewer.Review(ctx, o.Owner, o.Repo, pr.Number, &o.Config.Review)
+		if err != nil {
+			o.Display.StepFail("Code Review", err.Error())
+			return fmt.Errorf("review round %d: %w", round, err)
+		}
+
+		s.ReviewRound = round
+		_ = s.Save()
+
+		if issues == 0 {
+			o.Display.Step("Code Review", "approved")
+			return s.Advance(state.PhaseReview)
+		}
+
+		o.Display.Step("Code Review", fmt.Sprintf("round %d: %d issue(s) found", round, issues))
+
+		if round == maxRounds {
+			o.Display.Warn(fmt.Sprintf("Code Review: max rounds (%d) reached, proceeding", maxRounds))
+			break
+		}
+
+		_ = o.GH.PostComment(ctx, o.Owner, o.Repo, pr.Number,
+			fmt.Sprintf("🔧 Addressing review feedback (round %d/%d)...", round, maxRounds))
+
+		if err := codeAgent.Fix(ctx, fmt.Sprintf("Address the code review feedback from round %d. Check the PR review comments for details.", round)); err != nil {
+			return fmt.Errorf("fixing review issues (round %d): %w", round, err)
+		}
+
+		if err := o.Git.Push(ctx, codeAgent.Workdir, "origin", codeAgent.Branch); err != nil {
+			return fmt.Errorf("pushing review fixes (round %d): %w", round, err)
+		}
+	}
+
+	return s.Advance(state.PhaseReview)
 }
 
 // ---------------------------------------------------------------------------

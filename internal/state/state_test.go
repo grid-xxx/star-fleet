@@ -7,7 +7,7 @@ import (
 )
 
 func TestPhaseOrdering(t *testing.T) {
-	phases := []Phase{PhaseNew, PhaseIntake, PhaseImplement, PhasePR, PhaseWatch, PhaseDone}
+	phases := []Phase{PhaseNew, PhaseIntake, PhaseImplement, PhasePR, PhaseReview, PhaseWatch, PhaseDone}
 	for i := 1; i < len(phases); i++ {
 		if !phases[i].AtLeast(phases[i-1]) {
 			t.Errorf("%s should be AtLeast %s", phases[i], phases[i-1])
