@@ -14,6 +14,92 @@ import (
 	"github.com/nullne/star-fleet/internal/watch"
 )
 
+// GHClient abstracts GitHub operations for testing.
+type GHClient interface {
+	FetchIssue(ctx context.Context, owner, repo string, number int) (*gh.Issue, error)
+	PostComment(ctx context.Context, owner, repo string, number int, body string) error
+	DefaultBranch(ctx context.Context, owner, repo string) (string, error)
+	FindPR(ctx context.Context, owner, repo, head string) (*gh.PR, error)
+	CreatePR(ctx context.Context, workdir, title, body, base, head string) (*gh.PR, error)
+}
+
+// GitClient abstracts git operations for testing.
+type GitClient interface {
+	CreateWorktree(ctx context.Context, repoRoot, name, branch string) (string, error)
+	RemoveWorktree(ctx context.Context, repoRoot, name string) error
+	Push(ctx context.Context, dir, remote, branch string) error
+}
+
+// StateManager abstracts state persistence for testing.
+type StateManager interface {
+	Load(repoRoot string, number int) (*state.RunState, error)
+	New(repoRoot, owner, repo string, number int) *state.RunState
+}
+
+// WatchRunner abstracts the watch loop for testing.
+type WatchRunner interface {
+	Loop(ctx context.Context, codeAgent *agent.CodeAgent, s *state.RunState, cfg *config.Config, display *ui.Display) (*watch.Result, error)
+}
+
+// BackendFactory abstracts agent backend creation for testing.
+type BackendFactory interface {
+	NewBackend(name string) (agent.Backend, error)
+}
+
+// --- Default implementations that delegate to the real packages ---
+
+type defaultGH struct{}
+
+func (defaultGH) FetchIssue(ctx context.Context, owner, repo string, number int) (*gh.Issue, error) {
+	return gh.FetchIssue(ctx, owner, repo, number)
+}
+func (defaultGH) PostComment(ctx context.Context, owner, repo string, number int, body string) error {
+	return gh.PostComment(ctx, owner, repo, number, body)
+}
+func (defaultGH) DefaultBranch(ctx context.Context, owner, repo string) (string, error) {
+	return gh.DefaultBranch(ctx, owner, repo)
+}
+func (defaultGH) FindPR(ctx context.Context, owner, repo, head string) (*gh.PR, error) {
+	return gh.FindPR(ctx, owner, repo, head)
+}
+func (defaultGH) CreatePR(ctx context.Context, workdir, title, body, base, head string) (*gh.PR, error) {
+	return gh.CreatePR(ctx, workdir, title, body, base, head)
+}
+
+type defaultGit struct{}
+
+func (defaultGit) CreateWorktree(ctx context.Context, repoRoot, name, branch string) (string, error) {
+	return git.CreateWorktree(ctx, repoRoot, name, branch)
+}
+func (defaultGit) RemoveWorktree(ctx context.Context, repoRoot, name string) error {
+	return git.RemoveWorktree(ctx, repoRoot, name)
+}
+func (defaultGit) Push(ctx context.Context, dir, remote, branch string) error {
+	return git.Push(ctx, dir, remote, branch)
+}
+
+type defaultState struct{}
+
+func (defaultState) Load(repoRoot string, number int) (*state.RunState, error) {
+	return state.Load(repoRoot, number)
+}
+func (defaultState) New(repoRoot, owner, repo string, number int) *state.RunState {
+	return state.New(repoRoot, owner, repo, number)
+}
+
+type defaultWatch struct{}
+
+func (defaultWatch) Loop(ctx context.Context, codeAgent *agent.CodeAgent, s *state.RunState, cfg *config.Config, display *ui.Display) (*watch.Result, error) {
+	return watch.Loop(ctx, codeAgent, s, cfg, display)
+}
+
+type defaultBackendFactory struct{}
+
+func (defaultBackendFactory) NewBackend(name string) (agent.Backend, error) {
+	return agent.NewBackend(name)
+}
+
+// Orchestrator is the core pipeline controller.
 type Orchestrator struct {
 	Owner    string
 	Repo     string
@@ -23,9 +109,35 @@ type Orchestrator struct {
 	RepoRoot string
 	Restart  bool // when true, discard existing state and start fresh
 	NoWatch  bool // when true, skip the watch loop after creating PR
+
+	GH      GHClient
+	Git     GitClient
+	State   StateManager
+	Watch   WatchRunner
+	Backend BackendFactory
+}
+
+func (o *Orchestrator) init() {
+	if o.GH == nil {
+		o.GH = defaultGH{}
+	}
+	if o.Git == nil {
+		o.Git = defaultGit{}
+	}
+	if o.State == nil {
+		o.State = defaultState{}
+	}
+	if o.Watch == nil {
+		o.Watch = defaultWatch{}
+	}
+	if o.Backend == nil {
+		o.Backend = defaultBackendFactory{}
+	}
 }
 
 func (o *Orchestrator) Run(ctx context.Context) error {
+	o.init()
+
 	s, err := o.loadState()
 	if err != nil {
 		return err
@@ -39,7 +151,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	resuming := s.Phase != state.PhaseNew
 
 	if s.BaseBranch == "" {
-		baseBranch, err := gh.DefaultBranch(ctx, o.Owner, o.Repo)
+		baseBranch, err := o.GH.DefaultBranch(ctx, o.Owner, o.Repo)
 		if err != nil {
 			return fmt.Errorf("detecting default branch: %w", err)
 		}
@@ -58,14 +170,14 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	// === WORKTREE (single branch) ===
-	workdir, err := git.CreateWorktree(ctx, o.RepoRoot, "impl", s.Branch)
+	workdir, err := o.Git.CreateWorktree(ctx, o.RepoRoot, "impl", s.Branch)
 	if err != nil {
 		o.Display.StepFail("Creating worktree...", err.Error())
 		return fmt.Errorf("creating worktree: %w", err)
 	}
 	defer o.cleanup(ctx)
 
-	backend, err := agent.NewBackend(o.Config.Agent.Backend)
+	backend, err := o.Backend.NewBackend(o.Config.Agent.Backend)
 	if err != nil {
 		return err
 	}
@@ -109,16 +221,16 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 func (o *Orchestrator) loadState() (*state.RunState, error) {
 	if o.Restart {
-		return state.New(o.RepoRoot, o.Owner, o.Repo, o.Number), nil
+		return o.State.New(o.RepoRoot, o.Owner, o.Repo, o.Number), nil
 	}
-	s, err := state.Load(o.RepoRoot, o.Number)
+	s, err := o.State.Load(o.RepoRoot, o.Number)
 	if err != nil {
 		return nil, err
 	}
 	if s != nil {
 		return s, nil
 	}
-	return state.New(o.RepoRoot, o.Owner, o.Repo, o.Number), nil
+	return o.State.New(o.RepoRoot, o.Owner, o.Repo, o.Number), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -127,7 +239,7 @@ func (o *Orchestrator) loadState() (*state.RunState, error) {
 
 func (o *Orchestrator) phaseIntake(ctx context.Context, s *state.RunState) (*gh.Issue, error) {
 	if s.Phase.AtLeast(state.PhaseIntake) {
-		issue, err := gh.FetchIssue(ctx, o.Owner, o.Repo, o.Number)
+		issue, err := o.GH.FetchIssue(ctx, o.Owner, o.Repo, o.Number)
 		if err != nil {
 			return nil, err
 		}
@@ -153,7 +265,7 @@ func (o *Orchestrator) phaseIntake(ctx context.Context, s *state.RunState) (*gh.
 
 func (o *Orchestrator) intake(ctx context.Context) (*gh.Issue, error) {
 	sp := o.Display.TreeLeaf("Fetching issue...", "")
-	issue, err := gh.FetchIssue(ctx, o.Owner, o.Repo, o.Number)
+	issue, err := o.GH.FetchIssue(ctx, o.Owner, o.Repo, o.Number)
 	if err != nil {
 		sp.Stop("fail", err.Error())
 		return nil, err
@@ -171,14 +283,14 @@ func (o *Orchestrator) validateSpec(ctx context.Context, issue *gh.Issue) error 
 	if strings.TrimSpace(issue.Body) == "" {
 		gaps := "The issue body is empty. Please add a description of the desired behavior."
 		comment := "## 🔍 Star Fleet — Spec Gap\n\n" + gaps + "\n\nPipeline paused. Please update the issue and re-run."
-		_ = gh.PostComment(ctx, o.Owner, o.Repo, o.Number, comment)
+		_ = o.GH.PostComment(ctx, o.Owner, o.Repo, o.Number, comment)
 		o.Display.StepFail("Validating spec...", "empty issue body")
 		return fmt.Errorf("issue #%d has an empty body", o.Number)
 	}
 	if len(issue.Body) < 50 {
 		gaps := "The issue description seems too brief. Please provide more detail about expected behavior, acceptance criteria, or edge cases."
 		comment := "## 🔍 Star Fleet — Spec Gap\n\n" + gaps + "\n\nPipeline paused. Please update the issue and re-run."
-		_ = gh.PostComment(ctx, o.Owner, o.Repo, o.Number, comment)
+		_ = o.GH.PostComment(ctx, o.Owner, o.Repo, o.Number, comment)
 		o.Display.StepWarn("Validating spec...", "issue body is very short")
 		return fmt.Errorf("issue #%d body is too brief (%d chars)", o.Number, len(issue.Body))
 	}
@@ -186,7 +298,7 @@ func (o *Orchestrator) validateSpec(ctx context.Context, issue *gh.Issue) error 
 }
 
 func (o *Orchestrator) postPickedUp(ctx context.Context) error {
-	return gh.PostComment(ctx, o.Owner, o.Repo, o.Number,
+	return o.GH.PostComment(ctx, o.Owner, o.Repo, o.Number,
 		"## 🚀 Star Fleet — Picked Up\n\nThis issue has been picked up by Star Fleet. An agent is implementing the feature and writing tests.")
 }
 
@@ -235,7 +347,7 @@ func (o *Orchestrator) phasePR(ctx context.Context, s *state.RunState, codeAgent
 	}
 
 	// Push
-	if err := git.Push(ctx, codeAgent.Workdir, "origin", codeAgent.Branch); err != nil {
+	if err := o.Git.Push(ctx, codeAgent.Workdir, "origin", codeAgent.Branch); err != nil {
 		o.Display.StepFail("Pushing branch...", err.Error())
 		return nil, fmt.Errorf("pushing branch: %w", err)
 	}
@@ -266,14 +378,14 @@ func (o *Orchestrator) phasePR(ctx context.Context, s *state.RunState, codeAgent
 }
 
 func (o *Orchestrator) findOrCreatePR(ctx context.Context, workdir, title, body, base, head string) (*gh.PR, error) {
-	existing, err := gh.FindPR(ctx, o.Owner, o.Repo, head)
+	existing, err := o.GH.FindPR(ctx, o.Owner, o.Repo, head)
 	if err != nil {
 		return nil, err
 	}
 	if existing != nil {
 		return existing, nil
 	}
-	return gh.CreatePR(ctx, workdir, title, body, base, head)
+	return o.GH.CreatePR(ctx, workdir, title, body, base, head)
 }
 
 // ---------------------------------------------------------------------------
@@ -293,7 +405,7 @@ func (o *Orchestrator) phaseWatch(ctx context.Context, s *state.RunState, codeAg
 
 	o.Display.Info(fmt.Sprintf("Entering watch loop for PR #%d", pr.Number))
 
-	result, err := watch.Loop(ctx, codeAgent, s, o.Config, o.Display)
+	result, err := o.Watch.Loop(ctx, codeAgent, s, o.Config, o.Display)
 	if err != nil {
 		return fmt.Errorf("watch loop: %w", err)
 	}
@@ -315,5 +427,5 @@ func (o *Orchestrator) phaseWatch(ctx context.Context, s *state.RunState, codeAg
 }
 
 func (o *Orchestrator) cleanup(ctx context.Context) {
-	_ = git.RemoveWorktree(ctx, o.RepoRoot, "impl")
+	_ = o.Git.RemoveWorktree(ctx, o.RepoRoot, "impl")
 }
