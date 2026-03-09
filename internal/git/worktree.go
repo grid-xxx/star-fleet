@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/nullne/star-fleet/internal/retry"
 )
 
 func CreateWorktree(ctx context.Context, repoRoot, name, branch string) (string, error) {
@@ -50,8 +52,10 @@ func Merge(ctx context.Context, dir, branch string) error {
 }
 
 func Push(ctx context.Context, dir, remote, branch string) error {
-	_, err := runGit(ctx, dir, "push", "-u", remote, branch)
-	return err
+	return retry.Do(ctx, func() error {
+		_, err := runGit(ctx, dir, "push", "-u", remote, branch)
+		return err
+	})
 }
 
 func ForcePush(ctx context.Context, dir, remote, branch string) error {

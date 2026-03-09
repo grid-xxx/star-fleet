@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/nullne/star-fleet/internal/retry"
 )
 
 type Issue struct {
@@ -97,47 +99,58 @@ func PostComment(ctx context.Context, owner, repo string, number int, body strin
 
 func CreatePR(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*PR, error) {
 	nwo := owner + "/" + repo
-	out, err := run(ctx, workdir, "pr", "create",
-		"--repo", nwo,
-		"--title", title,
-		"--body", body,
-		"--base", base,
-		"--head", head)
-	if err != nil {
-		return nil, fmt.Errorf("creating PR: %w", err)
-	}
-	prURL := strings.TrimSpace(out)
-	parts := strings.Split(prURL, "/")
-	if len(parts) < 2 {
-		return nil, fmt.Errorf("unexpected PR URL: %s", prURL)
-	}
-	num, err := strconv.Atoi(parts[len(parts)-1])
-	if err != nil {
-		return nil, fmt.Errorf("parsing PR number from URL %s: %w", prURL, err)
-	}
-	return &PR{Number: num, URL: prURL}, nil
+	var pr *PR
+	err := retry.Do(ctx, func() error {
+		out, err := run(ctx, workdir, "pr", "create",
+			"--repo", nwo,
+			"--title", title,
+			"--body", body,
+			"--base", base,
+			"--head", head)
+		if err != nil {
+			return fmt.Errorf("creating PR: %w", err)
+		}
+		prURL := strings.TrimSpace(out)
+		parts := strings.Split(prURL, "/")
+		if len(parts) < 2 {
+			return fmt.Errorf("unexpected PR URL: %s", prURL)
+		}
+		num, err := strconv.Atoi(parts[len(parts)-1])
+		if err != nil {
+			return fmt.Errorf("parsing PR number from URL %s: %w", prURL, err)
+		}
+		pr = &PR{Number: num, URL: prURL}
+		return nil
+	})
+	return pr, err
 }
 
 // FindPR returns an existing open PR for the given head branch, or nil if none exists.
 func FindPR(ctx context.Context, owner, repo, head string) (*PR, error) {
 	nwo := owner + "/" + repo
-	out, err := run(ctx, "", "pr", "list",
-		"--repo", nwo,
-		"--head", head,
-		"--state", "open",
-		"--json", "number,url",
-		"--limit", "1")
-	if err != nil {
-		return nil, fmt.Errorf("listing PRs for %s: %w", head, err)
-	}
-	var prs []PR
-	if err := json.Unmarshal([]byte(out), &prs); err != nil {
-		return nil, fmt.Errorf("parsing PR list: %w", err)
-	}
-	if len(prs) == 0 {
-		return nil, nil
-	}
-	return &prs[0], nil
+	var result *PR
+	err := retry.Do(ctx, func() error {
+		out, err := run(ctx, "", "pr", "list",
+			"--repo", nwo,
+			"--head", head,
+			"--state", "open",
+			"--json", "number,url",
+			"--limit", "1")
+		if err != nil {
+			return fmt.Errorf("listing PRs for %s: %w", head, err)
+		}
+		var prs []PR
+		if err := json.Unmarshal([]byte(out), &prs); err != nil {
+			return fmt.Errorf("parsing PR list: %w", err)
+		}
+		if len(prs) == 0 {
+			result = nil
+		} else {
+			result = &prs[0]
+		}
+		return nil
+	})
+	return result, err
 }
 
 func PostReviewComment(ctx context.Context, owner, repo string, prNumber int, body string) error {
