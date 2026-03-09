@@ -1,5 +1,7 @@
 # Star Fleet
 
+[![test](https://github.com/grid-xxx/star-fleet/actions/workflows/test.yml/badge.svg)](https://github.com/grid-xxx/star-fleet/actions/workflows/test.yml) [![Go](https://img.shields.io/github/go-mod/go-version/grid-xxx/star-fleet)](https://go.dev/)
+
 A CLI tool that takes a GitHub Issue and autonomously delivers a human-ready PR.
 
 Two agents run in parallel — **Dev** writes implementation, **Test** writes tests — without seeing each other's work. A main orchestrator reviews, cross-validates, and delivers the final PR. All activity surfaces on GitHub via `gh`.
