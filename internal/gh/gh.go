@@ -190,9 +190,43 @@ func GetPRDiff(ctx context.Context, owner, repo string, prNumber int) (string, e
 	return runFn(ctx, "", "pr", "diff", strconv.Itoa(prNumber), "--repo", nwo)
 }
 
+// GetAuthenticatedUser returns the login of the currently authenticated GitHub user.
+func GetAuthenticatedUser(ctx context.Context) (string, error) {
+	out, err := runFn(ctx, "", "api", "user", "--jq", ".login")
+	if err != nil {
+		return "", fmt.Errorf("getting authenticated user: %w", err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// GetPRAuthor returns the login of the author of the given pull request.
+func GetPRAuthor(ctx context.Context, owner, repo string, prNumber int) (string, error) {
+	nwo := owner + "/" + repo
+	out, err := runFn(ctx, "", "pr", "view", strconv.Itoa(prNumber),
+		"--repo", nwo,
+		"--json", "author",
+		"--jq", ".author.login")
+	if err != nil {
+		return "", fmt.Errorf("getting PR author: %w", err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // SubmitReview submits a pull request review with the given event and body.
 // event must be "APPROVE", "REQUEST_CHANGES", or "COMMENT".
+// If the authenticated user is the PR author, REQUEST_CHANGES is automatically
+// downgraded to COMMENT to avoid GitHub's restriction on self-reviews.
 func SubmitReview(ctx context.Context, owner, repo string, prNumber int, event, body string) error {
+	if event == "REQUEST_CHANGES" {
+		me, err := GetAuthenticatedUser(ctx)
+		if err == nil {
+			author, err := GetPRAuthor(ctx, owner, repo, prNumber)
+			if err == nil && strings.EqualFold(me, author) {
+				event = "COMMENT"
+			}
+		}
+	}
+
 	nwo := owner + "/" + repo
 	var flag string
 	switch event {
@@ -209,7 +243,19 @@ func SubmitReview(ctx context.Context, owner, repo string, prNumber int, event, 
 		"--repo", nwo,
 		flag,
 		"--body", body)
+	if err != nil && event == "REQUEST_CHANGES" && isOwnPRError(err) {
+		_, err = runFn(ctx, "", "pr", "review", strconv.Itoa(prNumber),
+			"--repo", nwo,
+			"--comment",
+			"--body", body)
+	}
 	return err
+}
+
+// isOwnPRError returns true if the error message indicates GitHub rejected
+// a request-changes review because the reviewer is the PR author.
+func isOwnPRError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "can not request changes on your own pull request")
 }
 
 func DefaultBranch(ctx context.Context, owner, repo string) (string, error) {
