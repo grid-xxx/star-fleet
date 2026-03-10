@@ -19,8 +19,8 @@ type Handler struct {
 	botUser string
 	runner  Runner
 
-	mu   sync.Mutex
-	busy bool
+	mu      sync.Mutex
+	running map[string]bool // per-repo busy tracking: "owner/repo" -> true
 }
 
 // NewHandler creates an event handler.
@@ -32,6 +32,7 @@ func NewHandler(label, botUser string, runner Runner) *Handler {
 		label:   label,
 		botUser: botUser,
 		runner:  runner,
+		running: make(map[string]bool),
 	}
 }
 
@@ -152,32 +153,38 @@ func (h *Handler) isBot(user payloadUser) bool {
 	return false
 }
 
+func repoKey(owner, repo string) string {
+	return owner + "/" + repo
+}
+
 func (h *Handler) tryRun(owner, repo string, number int) (string, error) {
+	key := repoKey(owner, repo)
+
 	h.mu.Lock()
-	if h.busy {
+	if h.running[key] {
 		h.mu.Unlock()
-		log.Printf("handler: already running, rejecting issue #%d", number)
+		log.Printf("handler: %s already running, rejecting issue #%d", key, number)
 		return "busy", nil
 	}
-	h.busy = true
+	h.running[key] = true
 	h.mu.Unlock()
 
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("handler: panic in fleet run for %s/%s#%d: %v", owner, repo, number, r)
+				log.Printf("handler: panic in fleet run for %s#%d: %v", key, number, r)
 			}
 			h.mu.Lock()
-			h.busy = false
+			delete(h.running, key)
 			h.mu.Unlock()
 		}()
 
-		log.Printf("handler: starting fleet run for %s/%s#%d", owner, repo, number)
+		log.Printf("handler: starting fleet run for %s#%d", key, number)
 		if err := h.runner.Run(owner, repo, number); err != nil {
-			log.Printf("handler: fleet run failed for %s/%s#%d: %v", owner, repo, number, err)
+			log.Printf("handler: fleet run failed for %s#%d: %v", key, number, err)
 			return
 		}
-		log.Printf("handler: fleet run completed for %s/%s#%d", owner, repo, number)
+		log.Printf("handler: fleet run completed for %s#%d", key, number)
 	}()
 
 	return "triggered", nil
