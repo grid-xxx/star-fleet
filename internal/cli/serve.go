@@ -60,13 +60,6 @@ func init() {
 	serveCmd.Flags().StringVar(&serveBotUser, "bot-user", "", "GitHub login of the bot to ignore (anti-loop)")
 }
 
-func resolveWebhookSecret(flagValue string) string {
-	if flagValue != "" {
-		return flagValue
-	}
-	return os.Getenv("FLEET_WEBHOOK_SECRET")
-}
-
 func resolveEnvFlag(flagValue, envKey string) string {
 	if flagValue != "" {
 		return flagValue
@@ -75,7 +68,7 @@ func resolveEnvFlag(flagValue, envKey string) string {
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
-	secret := resolveWebhookSecret(serveWebhookSecret)
+	secret := resolveEnvFlag(serveWebhookSecret, "FLEET_WEBHOOK_SECRET")
 	if secret == "" {
 		return fmt.Errorf("webhook secret is required: use --webhook-secret or set FLEET_WEBHOOK_SECRET")
 	}

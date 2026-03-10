@@ -165,15 +165,17 @@ func TestInstallationToken_Cached(t *testing.T) {
 	t.Parallel()
 	_, pemData := generateTestKey(t)
 
-	callCount := 0
+	tokenCallCount := 0
+	installCallCount := 0
 	expiresAt := time.Now().Add(1 * time.Hour)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/users/test-owner/installation", func(w http.ResponseWriter, r *http.Request) {
+		installCallCount++
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(installationResponse{ID: 100})
 	})
 	mux.HandleFunc("/app/installations/100/access_tokens", func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		tokenCallCount++
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(installationTokenResponse{
@@ -190,13 +192,13 @@ func TestInstallationToken_Cached(t *testing.T) {
 	}
 	c.baseURL = srv.URL
 
-	// First call fetches
+	// First call fetches both installation ID and token
 	token1, err := c.InstallationToken("test-owner")
 	if err != nil {
 		t.Fatalf("first call: %v", err)
 	}
 
-	// Second call should use cache
+	// Second call should use cached installation ID and cached token
 	token2, err := c.InstallationToken("test-owner")
 	if err != nil {
 		t.Fatalf("second call: %v", err)
@@ -205,8 +207,11 @@ func TestInstallationToken_Cached(t *testing.T) {
 	if token1 != token2 {
 		t.Errorf("tokens differ: %q vs %q", token1, token2)
 	}
-	if callCount != 1 {
-		t.Errorf("token endpoint called %d times, want 1 (should be cached)", callCount)
+	if tokenCallCount != 1 {
+		t.Errorf("token endpoint called %d times, want 1 (should be cached)", tokenCallCount)
+	}
+	if installCallCount != 1 {
+		t.Errorf("installation lookup called %d times, want 1 (should be cached)", installCallCount)
 	}
 }
 

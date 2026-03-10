@@ -175,11 +175,11 @@ func TestEnsure_DifferentReposParallel(t *testing.T) {
 	cache := New(workdir, func(owner string) (string, error) {
 		return "token", nil
 	})
-	cache.gitRunFn = func(ctx context.Context, dir string, args ...string) (string, error) {
+	cache.gitRunFn = func(ctx context.Context, dir string, env []string, args ...string) (string, error) {
 		if len(args) > 0 && args[0] == "clone" {
 			cloneCount.Add(1)
 		}
-		return fakeGitRun(t, upstream)(ctx, dir, args...)
+		return fakeGitRun(t, upstream)(ctx, dir, env, args...)
 	}
 
 	var wg sync.WaitGroup
@@ -254,16 +254,16 @@ func TestIsGitRepo(t *testing.T) {
 
 // fakeGitRun intercepts "git clone" commands to clone from a local path
 // instead of a GitHub URL. All other git commands pass through normally.
-func fakeGitRun(t *testing.T, upstream string) func(ctx context.Context, dir string, args ...string) (string, error) {
+func fakeGitRun(t *testing.T, upstream string) func(ctx context.Context, dir string, env []string, args ...string) (string, error) {
 	t.Helper()
-	return func(ctx context.Context, dir string, args ...string) (string, error) {
+	return func(ctx context.Context, dir string, env []string, args ...string) (string, error) {
 		if len(args) >= 3 && args[0] == "clone" {
 			dest := args[2]
-			return defaultGitRun(ctx, "", "clone", upstream, dest)
+			return defaultGitRun(ctx, "", nil, "clone", upstream, dest)
 		}
 		if len(args) >= 4 && args[0] == "remote" && args[1] == "set-url" {
-			return defaultGitRun(ctx, dir, "remote", "set-url", args[2], upstream)
+			return defaultGitRun(ctx, dir, nil, "remote", "set-url", args[2], upstream)
 		}
-		return defaultGitRun(ctx, dir, args...)
+		return defaultGitRun(ctx, dir, nil, args...)
 	}
 }

@@ -18,10 +18,11 @@ type Client struct {
 	appID      int64
 	privateKey *rsa.PrivateKey
 
-	mu          sync.Mutex
-	tokenCache  map[int64]*cachedToken
-	httpClient  *http.Client
-	baseURL     string
+	mu             sync.Mutex
+	tokenCache     map[int64]*cachedToken
+	installIDCache map[string]int64
+	httpClient     *http.Client
+	baseURL        string
 }
 
 type cachedToken struct {
@@ -45,11 +46,12 @@ func NewClientFromPEM(appID int64, pemData []byte) (*Client, error) {
 		return nil, fmt.Errorf("parsing private key: %w", err)
 	}
 	return &Client{
-		appID:      appID,
-		privateKey: key,
-		tokenCache: make(map[int64]*cachedToken),
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		baseURL:    "https://api.github.com",
+		appID:          appID,
+		privateKey:     key,
+		tokenCache:     make(map[int64]*cachedToken),
+		installIDCache: make(map[string]int64),
+		httpClient:     &http.Client{Timeout: 30 * time.Second},
+		baseURL:        "https://api.github.com",
 	}, nil
 }
 
@@ -75,12 +77,25 @@ type installationResponse struct {
 }
 
 // InstallationToken returns an installation access token for the given owner.
-// Tokens are cached until close to expiry.
+// Both the owner→installationID mapping and the token itself are cached.
 func (c *Client) InstallationToken(owner string) (string, error) {
+	c.mu.Lock()
+	cachedID, ok := c.installIDCache[owner]
+	c.mu.Unlock()
+
+	if ok {
+		return c.getInstallationToken(cachedID)
+	}
+
 	installID, err := c.getInstallationID(owner)
 	if err != nil {
 		return "", err
 	}
+
+	c.mu.Lock()
+	c.installIDCache[owner] = installID
+	c.mu.Unlock()
+
 	return c.getInstallationToken(installID)
 }
 

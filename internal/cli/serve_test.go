@@ -4,38 +4,6 @@ import (
 	"testing"
 )
 
-func TestResolveWebhookSecret_Flag(t *testing.T) {
-	t.Parallel()
-	got := resolveWebhookSecret("my-flag-secret")
-	if got != "my-flag-secret" {
-		t.Errorf("got %q, want %q", got, "my-flag-secret")
-	}
-}
-
-func TestResolveWebhookSecret_Env(t *testing.T) {
-	t.Setenv("FLEET_WEBHOOK_SECRET", "my-env-secret")
-	got := resolveWebhookSecret("")
-	if got != "my-env-secret" {
-		t.Errorf("got %q, want %q", got, "my-env-secret")
-	}
-}
-
-func TestResolveWebhookSecret_FlagOverridesEnv(t *testing.T) {
-	t.Setenv("FLEET_WEBHOOK_SECRET", "env-val")
-	got := resolveWebhookSecret("flag-val")
-	if got != "flag-val" {
-		t.Errorf("got %q, want %q", got, "flag-val")
-	}
-}
-
-func TestResolveWebhookSecret_Empty(t *testing.T) {
-	t.Setenv("FLEET_WEBHOOK_SECRET", "")
-	got := resolveWebhookSecret("")
-	if got != "" {
-		t.Errorf("got %q, want empty", got)
-	}
-}
-
 func TestResolveEnvFlag_FlagWins(t *testing.T) {
 	t.Parallel()
 	got := resolveEnvFlag("flag-val", "TEST_RESOLVE_KEY_UNUSED")
