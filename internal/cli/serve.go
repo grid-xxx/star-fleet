@@ -67,27 +67,42 @@ func resolveEnvFlag(flagValue, envKey string) string {
 	return os.Getenv(envKey)
 }
 
-func runServe(cmd *cobra.Command, args []string) error {
-	secret := resolveEnvFlag(serveWebhookSecret, "FLEET_WEBHOOK_SECRET")
+type serveConfig struct {
+	secret  string
+	appID   int64
+	pemPath string
+}
+
+func resolveServeConfig(webhookSecret, appIDFlag, privateKeyFlag string) (*serveConfig, error) {
+	secret := resolveEnvFlag(webhookSecret, "FLEET_WEBHOOK_SECRET")
 	if secret == "" {
-		return fmt.Errorf("webhook secret is required: use --webhook-secret or set FLEET_WEBHOOK_SECRET")
+		return nil, fmt.Errorf("webhook secret is required: use --webhook-secret or set FLEET_WEBHOOK_SECRET")
 	}
 
-	appIDStr := resolveEnvFlag(serveAppID, "FLEET_APP_ID")
+	appIDStr := resolveEnvFlag(appIDFlag, "FLEET_APP_ID")
 	if appIDStr == "" {
-		return fmt.Errorf("app ID is required: use --app-id or set FLEET_APP_ID")
+		return nil, fmt.Errorf("app ID is required: use --app-id or set FLEET_APP_ID")
 	}
 	appID, err := strconv.ParseInt(appIDStr, 10, 64)
 	if err != nil {
-		return fmt.Errorf("invalid app ID %q: %w", appIDStr, err)
+		return nil, fmt.Errorf("invalid app ID %q: %w", appIDStr, err)
 	}
 
-	pemPath := resolveEnvFlag(serveAppPrivateKey, "FLEET_APP_PRIVATE_KEY_PATH")
+	pemPath := resolveEnvFlag(privateKeyFlag, "FLEET_APP_PRIVATE_KEY_PATH")
 	if pemPath == "" {
-		return fmt.Errorf("app private key is required: use --app-private-key or set FLEET_APP_PRIVATE_KEY_PATH")
+		return nil, fmt.Errorf("app private key is required: use --app-private-key or set FLEET_APP_PRIVATE_KEY_PATH")
 	}
 
-	appClient, err := ghapp.NewClient(appID, pemPath)
+	return &serveConfig{secret: secret, appID: appID, pemPath: pemPath}, nil
+}
+
+func runServe(cmd *cobra.Command, args []string) error {
+	cfg, err := resolveServeConfig(serveWebhookSecret, serveAppID, serveAppPrivateKey)
+	if err != nil {
+		return err
+	}
+
+	appClient, err := ghapp.NewClient(cfg.appID, cfg.pemPath)
 	if err != nil {
 		return fmt.Errorf("initializing GitHub App client: %w", err)
 	}
@@ -100,7 +115,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	handler := webhook.NewHandler(serveLabel, serveBotUser, runner)
-	srv := webhook.NewServer(servePort, secret, handler)
+	srv := webhook.NewServer(servePort, cfg.secret, handler)
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

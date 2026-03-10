@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -93,7 +94,8 @@ func isGitRepo(dir string) bool {
 // credentialEnv returns env vars that configure git to use an inline credential
 // helper, keeping the token out of URLs, command args, and .git/config.
 func credentialEnv(token string) []string {
-	helper := fmt.Sprintf("!f() { echo username=x-access-token; echo password=%s; }; f", token)
+	escaped := strings.ReplaceAll(token, "'", `'"'"'`)
+	helper := fmt.Sprintf("!f() { echo username=x-access-token; echo password='%s'; }; f", escaped)
 	return []string{
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_CONFIG_COUNT=1",
@@ -107,7 +109,7 @@ func (c *Cache) clone(ctx context.Context, owner, repo, token, dest string) erro
 		return fmt.Errorf("creating parent dir: %w", err)
 	}
 
-	cloneURL := fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
+	cloneURL := fmt.Sprintf("https://github.com/%s/%s.git", url.PathEscape(owner), url.PathEscape(repo))
 	authEnv := credentialEnv(token)
 	if _, err := c.gitRunFn(ctx, "", authEnv, "clone", cloneURL, dest); err != nil {
 		return err
@@ -132,14 +134,14 @@ func (c *Cache) fetch(ctx context.Context, dir, owner, repo, token string) error
 
 	branch, err := c.gitRunFn(ctx, dir, nil, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
-		log.Printf("repocache: rev-parse HEAD failed for %s/%s (non-fatal): %v", owner, repo, err)
-		return nil
+		return fmt.Errorf("rev-parse HEAD for %s/%s: %w", owner, repo, err)
 	}
 	branch = strings.TrimSpace(branch)
-	if branch != "" && branch != "HEAD" {
-		if _, err := c.gitRunFn(ctx, dir, nil, "reset", "--hard", "origin/"+branch); err != nil {
-			log.Printf("repocache: reset to origin/%s failed (non-fatal): %v", branch, err)
-		}
+	if branch == "" || branch == "HEAD" {
+		branch = "HEAD"
+	}
+	if _, err := c.gitRunFn(ctx, dir, nil, "reset", "--hard", "origin/"+branch); err != nil {
+		return fmt.Errorf("reset to origin/%s for %s/%s: %w", branch, owner, repo, err)
 	}
 
 	return nil

@@ -83,74 +83,35 @@ func TestServeCmdRegistered(t *testing.T) {
 	}
 }
 
-func TestRunServe_MissingSecret(t *testing.T) {
+func TestResolveServeConfig_MissingSecret(t *testing.T) {
 	t.Setenv("FLEET_WEBHOOK_SECRET", "")
 
-	old := serveWebhookSecret
-	serveWebhookSecret = ""
-	defer func() { serveWebhookSecret = old }()
-
-	err := runServe(serveCmd, nil)
+	_, err := resolveServeConfig("", "", "")
 	if err == nil {
 		t.Fatal("expected error when webhook secret is missing")
 	}
 }
 
-func TestRunServe_MissingAppID(t *testing.T) {
-	t.Setenv("FLEET_WEBHOOK_SECRET", "test-secret")
+func TestResolveServeConfig_MissingAppID(t *testing.T) {
 	t.Setenv("FLEET_APP_ID", "")
 
-	old := serveWebhookSecret
-	oldAppID := serveAppID
-	serveWebhookSecret = "test-secret"
-	serveAppID = ""
-	defer func() {
-		serveWebhookSecret = old
-		serveAppID = oldAppID
-	}()
-
-	err := runServe(serveCmd, nil)
+	_, err := resolveServeConfig("test-secret", "", "")
 	if err == nil {
 		t.Fatal("expected error when app ID is missing")
 	}
 }
 
-func TestRunServe_MissingPrivateKey(t *testing.T) {
-	t.Setenv("FLEET_WEBHOOK_SECRET", "test-secret")
-	t.Setenv("FLEET_APP_ID", "12345")
+func TestResolveServeConfig_MissingPrivateKey(t *testing.T) {
 	t.Setenv("FLEET_APP_PRIVATE_KEY_PATH", "")
 
-	old := serveWebhookSecret
-	oldAppID := serveAppID
-	oldPK := serveAppPrivateKey
-	serveWebhookSecret = "test-secret"
-	serveAppID = "12345"
-	serveAppPrivateKey = ""
-	defer func() {
-		serveWebhookSecret = old
-		serveAppID = oldAppID
-		serveAppPrivateKey = oldPK
-	}()
-
-	err := runServe(serveCmd, nil)
+	_, err := resolveServeConfig("test-secret", "12345", "")
 	if err == nil {
 		t.Fatal("expected error when private key is missing")
 	}
 }
 
-func TestRunServe_InvalidAppID(t *testing.T) {
-	t.Setenv("FLEET_WEBHOOK_SECRET", "test-secret")
-
-	old := serveWebhookSecret
-	oldAppID := serveAppID
-	serveWebhookSecret = "test-secret"
-	serveAppID = "not-a-number"
-	defer func() {
-		serveWebhookSecret = old
-		serveAppID = oldAppID
-	}()
-
-	err := runServe(serveCmd, nil)
+func TestResolveServeConfig_InvalidAppID(t *testing.T) {
+	_, err := resolveServeConfig("test-secret", "not-a-number", "/some/path.pem")
 	if err == nil {
 		t.Fatal("expected error for invalid app ID")
 	}

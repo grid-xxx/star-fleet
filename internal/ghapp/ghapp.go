@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"sync"
 	"time"
@@ -105,8 +106,8 @@ func (c *Client) getInstallationID(owner string) (int64, error) {
 		return 0, fmt.Errorf("generating JWT: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/users/%s/installation", c.baseURL, owner)
-	req, err := http.NewRequest("GET", url, nil)
+	reqURL := fmt.Sprintf("%s/users/%s/installation", c.baseURL, url.PathEscape(owner))
+	req, err := http.NewRequest("GET", reqURL, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -146,8 +147,8 @@ func (c *Client) getInstallationToken(installationID int64) (string, error) {
 		return "", fmt.Errorf("generating JWT: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/app/installations/%d/access_tokens", c.baseURL, installationID)
-	req, err := http.NewRequest("POST", url, nil)
+	reqURL := fmt.Sprintf("%s/app/installations/%d/access_tokens", c.baseURL, installationID)
+	req, err := http.NewRequest("POST", reqURL, nil)
 	if err != nil {
 		return "", err
 	}
@@ -178,9 +179,4 @@ func (c *Client) getInstallationToken(installationID int64) (string, error) {
 	c.mu.Unlock()
 
 	return tokenResp.Token, nil
-}
-
-// CloneURL returns a clone URL with the installation token embedded for auth.
-func CloneURL(owner, repo, token string) string {
-	return fmt.Sprintf("https://x-access-token:%s@github.com/%s/%s.git", token, owner, repo)
 }

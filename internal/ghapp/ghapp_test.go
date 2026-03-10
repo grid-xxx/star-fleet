@@ -285,12 +285,3 @@ func TestInstallationToken_InstallationNotFound(t *testing.T) {
 		t.Errorf("error = %v, want to contain 404", err)
 	}
 }
-
-func TestCloneURL(t *testing.T) {
-	t.Parallel()
-	got := CloneURL("myorg", "myrepo", "ghs_abc123")
-	want := "https://x-access-token:ghs_abc123@github.com/myorg/myrepo.git"
-	if got != want {
-		t.Errorf("CloneURL = %q, want %q", got, want)
-	}
-}
