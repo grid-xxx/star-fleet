@@ -11,6 +11,7 @@ type stubRunner struct {
 	mu      sync.Mutex
 	calls   []runCall
 	blockCh chan struct{} // if non-nil, Run blocks until closed
+	doneCh  chan struct{} // closed after each Run completes
 	err     error
 }
 
@@ -20,13 +21,29 @@ type runCall struct {
 	Number int
 }
 
+func newStubRunner() *stubRunner {
+	return &stubRunner{
+		doneCh: make(chan struct{}, 10),
+	}
+}
+
+func newBlockingStubRunner() *stubRunner {
+	return &stubRunner{
+		blockCh: make(chan struct{}),
+		doneCh:  make(chan struct{}, 10),
+	}
+}
+
 func (r *stubRunner) Run(owner, repo string, number int) error {
 	if r.blockCh != nil {
 		<-r.blockCh
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.calls = append(r.calls, runCall{owner, repo, number})
+	r.mu.Unlock()
+	if r.doneCh != nil {
+		r.doneCh <- struct{}{}
+	}
 	return r.err
 }
 
@@ -38,12 +55,21 @@ func (r *stubRunner) getCalls() []runCall {
 	return out
 }
 
+func (r *stubRunner) waitDone(t *testing.T) {
+	t.Helper()
+	select {
+	case <-r.doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for run to complete")
+	}
+}
+
 // --- issues event tests ---
 
 func TestHandleIssues_Labeled(t *testing.T) {
 	t.Parallel()
 
-	runner := &stubRunner{}
+	runner := newStubRunner()
 	h := NewHandler("fleet", "", runner)
 
 	p := issuesPayload{
@@ -64,8 +90,7 @@ func TestHandleIssues_Labeled(t *testing.T) {
 		t.Errorf("status = %q, want %q", status, "triggered")
 	}
 
-	// Let the goroutine finish
-	time.Sleep(50 * time.Millisecond)
+	runner.waitDone(t)
 
 	calls := runner.getCalls()
 	if len(calls) != 1 {
@@ -79,7 +104,7 @@ func TestHandleIssues_Labeled(t *testing.T) {
 func TestHandleIssues_WrongLabel(t *testing.T) {
 	t.Parallel()
 
-	runner := &stubRunner{}
+	runner := newStubRunner()
 	h := NewHandler("fleet", "", runner)
 
 	p := issuesPayload{
@@ -102,7 +127,7 @@ func TestHandleIssues_WrongLabel(t *testing.T) {
 func TestHandleIssues_WrongAction(t *testing.T) {
 	t.Parallel()
 
-	runner := &stubRunner{}
+	runner := newStubRunner()
 	h := NewHandler("fleet", "", runner)
 
 	p := issuesPayload{Action: "opened"}
@@ -120,7 +145,7 @@ func TestHandleIssues_WrongAction(t *testing.T) {
 func TestHandleIssues_BotSender(t *testing.T) {
 	t.Parallel()
 
-	runner := &stubRunner{}
+	runner := newStubRunner()
 	h := NewHandler("fleet", "my-bot[bot]", runner)
 
 	p := issuesPayload{
@@ -143,7 +168,7 @@ func TestHandleIssues_BotSender(t *testing.T) {
 func TestHandleIssues_BotType(t *testing.T) {
 	t.Parallel()
 
-	runner := &stubRunner{}
+	runner := newStubRunner()
 	h := NewHandler("fleet", "", runner)
 
 	p := issuesPayload{
@@ -166,7 +191,7 @@ func TestHandleIssues_BotType(t *testing.T) {
 func TestHandleIssues_LabelCaseInsensitive(t *testing.T) {
 	t.Parallel()
 
-	runner := &stubRunner{}
+	runner := newStubRunner()
 	h := NewHandler("fleet", "", runner)
 
 	p := issuesPayload{
@@ -193,7 +218,7 @@ func TestHandleIssues_LabelCaseInsensitive(t *testing.T) {
 func TestHandleIssueComment_FleetRun(t *testing.T) {
 	t.Parallel()
 
-	runner := &stubRunner{}
+	runner := newStubRunner()
 	h := NewHandler("fleet", "", runner)
 
 	p := issueCommentPayload{
@@ -214,7 +239,7 @@ func TestHandleIssueComment_FleetRun(t *testing.T) {
 		t.Errorf("status = %q, want %q", status, "triggered")
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	runner.waitDone(t)
 	calls := runner.getCalls()
 	if len(calls) != 1 {
 		t.Fatalf("got %d calls, want 1", len(calls))
@@ -224,10 +249,10 @@ func TestHandleIssueComment_FleetRun(t *testing.T) {
 	}
 }
 
-func TestHandleIssueComment_FleetRunWithExtraText(t *testing.T) {
+func TestHandleIssueComment_FleetRunWithArgs(t *testing.T) {
 	t.Parallel()
 
-	runner := &stubRunner{}
+	runner := newStubRunner()
 	h := NewHandler("fleet", "", runner)
 
 	p := issueCommentPayload{
@@ -235,7 +260,7 @@ func TestHandleIssueComment_FleetRunWithExtraText(t *testing.T) {
 		Issue:  payloadIssue{Number: 3},
 		Repo:   payloadRepo{Name: "r"},
 	}
-	p.Comment.Body = "/fleet run please"
+	p.Comment.Body = "/fleet run --restart"
 	p.Comment.User = payloadUser{Login: "alice", Type: "User"}
 	p.Repo.Owner.Login = "o"
 
@@ -249,10 +274,31 @@ func TestHandleIssueComment_FleetRunWithExtraText(t *testing.T) {
 	}
 }
 
+func TestHandleIssueComment_FleetRunSubstring(t *testing.T) {
+	t.Parallel()
+
+	runner := newStubRunner()
+	h := NewHandler("fleet", "", runner)
+
+	// "/fleet running" should NOT trigger
+	p := issueCommentPayload{Action: "created"}
+	p.Comment.Body = "/fleet running tests"
+	p.Comment.User = payloadUser{Login: "alice", Type: "User"}
+
+	body, _ := json.Marshal(p)
+	status, err := h.HandleEvent("issue_comment", body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status != "skipped" {
+		t.Errorf("status = %q, want %q", status, "skipped")
+	}
+}
+
 func TestHandleIssueComment_NoCommand(t *testing.T) {
 	t.Parallel()
 
-	runner := &stubRunner{}
+	runner := newStubRunner()
 	h := NewHandler("fleet", "", runner)
 
 	p := issueCommentPayload{Action: "created"}
@@ -272,7 +318,7 @@ func TestHandleIssueComment_NoCommand(t *testing.T) {
 func TestHandleIssueComment_EditedAction(t *testing.T) {
 	t.Parallel()
 
-	runner := &stubRunner{}
+	runner := newStubRunner()
 	h := NewHandler("fleet", "", runner)
 
 	p := issueCommentPayload{Action: "edited"}
@@ -292,7 +338,7 @@ func TestHandleIssueComment_EditedAction(t *testing.T) {
 func TestHandleIssueComment_BotComment(t *testing.T) {
 	t.Parallel()
 
-	runner := &stubRunner{}
+	runner := newStubRunner()
 	h := NewHandler("fleet", "fleet-bot[bot]", runner)
 
 	p := issueCommentPayload{
@@ -317,8 +363,7 @@ func TestHandleIssueComment_BotComment(t *testing.T) {
 func TestTryRun_RejectWhenBusy(t *testing.T) {
 	t.Parallel()
 
-	blockCh := make(chan struct{})
-	runner := &stubRunner{blockCh: blockCh}
+	runner := newBlockingStubRunner()
 	h := NewHandler("fleet", "", runner)
 
 	// First event: triggers a run that blocks
@@ -363,8 +408,8 @@ func TestTryRun_RejectWhenBusy(t *testing.T) {
 	}
 
 	// Unblock the first run
-	close(blockCh)
-	time.Sleep(50 * time.Millisecond)
+	close(runner.blockCh)
+	runner.waitDone(t)
 
 	calls := runner.getCalls()
 	if len(calls) != 1 {
@@ -375,7 +420,7 @@ func TestTryRun_RejectWhenBusy(t *testing.T) {
 func TestTryRun_AllowsAfterCompletion(t *testing.T) {
 	t.Parallel()
 
-	runner := &stubRunner{}
+	runner := newStubRunner()
 	h := NewHandler("fleet", "", runner)
 
 	p := issuesPayload{
@@ -397,7 +442,7 @@ func TestTryRun_AllowsAfterCompletion(t *testing.T) {
 	}
 
 	// Wait for first run to complete
-	time.Sleep(50 * time.Millisecond)
+	runner.waitDone(t)
 
 	// Second run should also be accepted
 	p.Issue.Number = 2
@@ -416,7 +461,7 @@ func TestTryRun_AllowsAfterCompletion(t *testing.T) {
 func TestHandleEvent_UnknownType(t *testing.T) {
 	t.Parallel()
 
-	h := NewHandler("fleet", "", &stubRunner{})
+	h := NewHandler("fleet", "", newStubRunner())
 	status, err := h.HandleEvent("push", []byte(`{}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -431,7 +476,7 @@ func TestHandleEvent_UnknownType(t *testing.T) {
 func TestHandleEvent_MalformedPayload(t *testing.T) {
 	t.Parallel()
 
-	h := NewHandler("fleet", "", &stubRunner{})
+	h := NewHandler("fleet", "", newStubRunner())
 
 	_, err := h.HandleEvent("issues", []byte(`not-json`))
 	if err == nil {

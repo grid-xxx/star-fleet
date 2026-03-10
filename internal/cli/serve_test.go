@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"os"
 	"testing"
 )
 
@@ -30,7 +29,7 @@ func TestResolveWebhookSecret_FlagOverridesEnv(t *testing.T) {
 }
 
 func TestResolveWebhookSecret_Empty(t *testing.T) {
-	os.Unsetenv("FLEET_WEBHOOK_SECRET")
+	t.Setenv("FLEET_WEBHOOK_SECRET", "")
 	got := resolveWebhookSecret("")
 	if got != "" {
 		t.Errorf("got %q, want empty", got)
@@ -82,7 +81,7 @@ func TestServeCmdRegistered(t *testing.T) {
 }
 
 func TestRunServe_MissingSecret(t *testing.T) {
-	os.Unsetenv("FLEET_WEBHOOK_SECRET")
+	t.Setenv("FLEET_WEBHOOK_SECRET", "")
 
 	old := serveWebhookSecret
 	serveWebhookSecret = ""

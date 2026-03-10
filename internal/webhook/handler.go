@@ -128,8 +128,8 @@ func (h *Handler) handleIssueComment(payload []byte) (string, error) {
 	}
 
 	body := strings.TrimSpace(p.Comment.Body)
-	if !strings.HasPrefix(body, "/fleet run") {
-		log.Printf("handler: comment does not start with /fleet run, skipping")
+	if body != "/fleet run" && !strings.HasPrefix(body, "/fleet run ") && !strings.HasPrefix(body, "/fleet run\n") {
+		log.Printf("handler: comment does not match /fleet run command, skipping")
 		return "skipped", nil
 	}
 
@@ -164,6 +164,9 @@ func (h *Handler) tryRun(owner, repo string, number int) (string, error) {
 
 	go func() {
 		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("handler: panic in fleet run for %s/%s#%d: %v", owner, repo, number, r)
+			}
 			h.mu.Lock()
 			h.busy = false
 			h.mu.Unlock()

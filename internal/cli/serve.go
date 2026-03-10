@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -82,7 +83,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 	go func() {
 		<-ctx.Done()
 		log.Println("serve: shutting down...")
-		shutdownCtx := context.Background()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("serve: shutdown error: %v", err)
 		}
