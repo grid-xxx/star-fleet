@@ -7,13 +7,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/nullne/star-fleet/internal/config"
+	"github.com/nullne/star-fleet/internal/ghapp"
 	"github.com/nullne/star-fleet/internal/orchestrator"
+	"github.com/nullne/star-fleet/internal/repocache"
 	"github.com/nullne/star-fleet/internal/ui"
 	"github.com/nullne/star-fleet/internal/webhook"
 )
@@ -21,7 +24,9 @@ import (
 var (
 	servePort          int
 	serveWebhookSecret string
-	serveRepo          string
+	serveWorkdir       string
+	serveAppID         string
+	serveAppPrivateKey string
 	serveLabel         string
 	serveBotUser       string
 )
@@ -37,14 +42,20 @@ The server handles:
   - issue_comment events: triggers a run when a comment starts with /fleet run
 
 The webhook secret is required for signature verification and can be provided
-via the --webhook-secret flag or the FLEET_WEBHOOK_SECRET environment variable.`,
+via the --webhook-secret flag or the FLEET_WEBHOOK_SECRET environment variable.
+
+GitHub App credentials (--app-id, --app-private-key) are required for authenticating
+git operations and API calls. They can also be set via FLEET_APP_ID and
+FLEET_APP_PRIVATE_KEY_PATH environment variables.`,
 	RunE: runServe,
 }
 
 func init() {
 	serveCmd.Flags().IntVar(&servePort, "port", 8888, "HTTP listen port")
 	serveCmd.Flags().StringVar(&serveWebhookSecret, "webhook-secret", "", "GitHub webhook secret for signature verification (or FLEET_WEBHOOK_SECRET env)")
-	serveCmd.Flags().StringVar(&serveRepo, "repo", ".", "path to the git repo to operate on")
+	serveCmd.Flags().StringVar(&serveWorkdir, "workdir", "/data/fleet-workdirs", "base directory for repo clones")
+	serveCmd.Flags().StringVar(&serveAppID, "app-id", "", "GitHub App ID (or FLEET_APP_ID env)")
+	serveCmd.Flags().StringVar(&serveAppPrivateKey, "app-private-key", "", "path to GitHub App private key PEM (or FLEET_APP_PRIVATE_KEY_PATH env)")
 	serveCmd.Flags().StringVar(&serveLabel, "label", "fleet", "issue label that triggers a fleet run")
 	serveCmd.Flags().StringVar(&serveBotUser, "bot-user", "", "GitHub login of the bot to ignore (anti-loop)")
 }
@@ -56,22 +67,43 @@ func resolveWebhookSecret(flagValue string) string {
 	return os.Getenv("FLEET_WEBHOOK_SECRET")
 }
 
+func resolveEnvFlag(flagValue, envKey string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	return os.Getenv(envKey)
+}
+
 func runServe(cmd *cobra.Command, args []string) error {
 	secret := resolveWebhookSecret(serveWebhookSecret)
 	if secret == "" {
 		return fmt.Errorf("webhook secret is required: use --webhook-secret or set FLEET_WEBHOOK_SECRET")
 	}
 
-	repoRoot := serveRepo
-
-	cfg, err := config.Load(repoRoot)
+	appIDStr := resolveEnvFlag(serveAppID, "FLEET_APP_ID")
+	if appIDStr == "" {
+		return fmt.Errorf("app ID is required: use --app-id or set FLEET_APP_ID")
+	}
+	appID, err := strconv.ParseInt(appIDStr, 10, 64)
 	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
+		return fmt.Errorf("invalid app ID %q: %w", appIDStr, err)
 	}
 
+	pemPath := resolveEnvFlag(serveAppPrivateKey, "FLEET_APP_PRIVATE_KEY_PATH")
+	if pemPath == "" {
+		return fmt.Errorf("app private key is required: use --app-private-key or set FLEET_APP_PRIVATE_KEY_PATH")
+	}
+
+	appClient, err := ghapp.NewClient(appID, pemPath)
+	if err != nil {
+		return fmt.Errorf("initializing GitHub App client: %w", err)
+	}
+
+	workdir := serveWorkdir
+	cache := repocache.New(workdir, appClient.InstallationToken)
+
 	runner := &pipelineRunner{
-		repoRoot: repoRoot,
-		cfg:      cfg,
+		cache: cache,
 	}
 
 	handler := webhook.NewHandler(serveLabel, serveBotUser, runner)
@@ -91,7 +123,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}()
 
 	log.Printf("serve: listening on :%d", servePort)
-	log.Printf("serve: trigger label=%q, bot-user=%q, repo=%q", serveLabel, serveBotUser, repoRoot)
+	log.Printf("serve: trigger label=%q, bot-user=%q, workdir=%q", serveLabel, serveBotUser, workdir)
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("server error: %w", err)
@@ -99,21 +131,33 @@ func runServe(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// pipelineRunner implements webhook.Runner by creating and running an Orchestrator.
+// pipelineRunner implements webhook.Runner by cloning/fetching the repo and
+// running an Orchestrator against the local clone.
 type pipelineRunner struct {
-	repoRoot string
-	cfg      *config.Config
+	cache *repocache.Cache
 }
 
 func (r *pipelineRunner) Run(owner, repo string, number int) error {
+	ctx := context.Background()
+
+	repoRoot, err := r.cache.Ensure(ctx, owner, repo)
+	if err != nil {
+		return fmt.Errorf("ensuring repo clone: %w", err)
+	}
+
+	cfg, err := config.Load(repoRoot)
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
 	display := ui.New()
 	o := &orchestrator.Orchestrator{
 		Owner:    owner,
 		Repo:     repo,
 		Number:   number,
-		Config:   r.cfg,
+		Config:   cfg,
 		Display:  display,
-		RepoRoot: r.repoRoot,
+		RepoRoot: repoRoot,
 	}
-	return o.Run(context.Background())
+	return o.Run(ctx)
 }

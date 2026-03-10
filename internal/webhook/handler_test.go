@@ -360,13 +360,12 @@ func TestHandleIssueComment_BotComment(t *testing.T) {
 
 // --- concurrency tests ---
 
-func TestTryRun_RejectWhenBusy(t *testing.T) {
+func TestTryRun_RejectWhenBusy_SameRepo(t *testing.T) {
 	t.Parallel()
 
 	runner := newBlockingStubRunner()
 	h := NewHandler("fleet", "", runner)
 
-	// First event: triggers a run that blocks
 	p1 := issuesPayload{
 		Action: "labeled",
 		Label:  payloadLabel{Name: "fleet"},
@@ -388,7 +387,7 @@ func TestTryRun_RejectWhenBusy(t *testing.T) {
 	// Give goroutine time to start and acquire the busy flag
 	time.Sleep(20 * time.Millisecond)
 
-	// Second event: should be rejected because busy
+	// Second event for SAME repo: should be rejected because busy
 	p2 := issuesPayload{
 		Action: "labeled",
 		Label:  payloadLabel{Name: "fleet"},
@@ -414,6 +413,63 @@ func TestTryRun_RejectWhenBusy(t *testing.T) {
 	calls := runner.getCalls()
 	if len(calls) != 1 {
 		t.Fatalf("got %d calls, want 1 (second should have been rejected)", len(calls))
+	}
+}
+
+func TestTryRun_AllowDifferentReposInParallel(t *testing.T) {
+	t.Parallel()
+
+	runner := newBlockingStubRunner()
+	h := NewHandler("fleet", "", runner)
+
+	// Trigger run for repo-a
+	p1 := issuesPayload{
+		Action: "labeled",
+		Label:  payloadLabel{Name: "fleet"},
+		Issue:  payloadIssue{Number: 1},
+		Sender: payloadUser{Login: "alice", Type: "User"},
+		Repo:   payloadRepo{Name: "repo-a"},
+	}
+	p1.Repo.Owner.Login = "org"
+	body1, _ := json.Marshal(p1)
+
+	status1, err := h.HandleEvent("issues", body1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status1 != "triggered" {
+		t.Errorf("repo-a status = %q, want %q", status1, "triggered")
+	}
+
+	time.Sleep(20 * time.Millisecond)
+
+	// Trigger run for repo-b — should also be accepted (different repo)
+	p2 := issuesPayload{
+		Action: "labeled",
+		Label:  payloadLabel{Name: "fleet"},
+		Issue:  payloadIssue{Number: 2},
+		Sender: payloadUser{Login: "bob", Type: "User"},
+		Repo:   payloadRepo{Name: "repo-b"},
+	}
+	p2.Repo.Owner.Login = "org"
+	body2, _ := json.Marshal(p2)
+
+	status2, err := h.HandleEvent("issues", body2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status2 != "triggered" {
+		t.Errorf("repo-b status = %q, want %q (different repos should run in parallel)", status2, "triggered")
+	}
+
+	// Unblock both runs
+	close(runner.blockCh)
+	runner.waitDone(t)
+	runner.waitDone(t)
+
+	calls := runner.getCalls()
+	if len(calls) != 2 {
+		t.Fatalf("got %d calls, want 2 (both repos should run)", len(calls))
 	}
 }
 

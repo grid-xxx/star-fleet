@@ -36,6 +36,30 @@ func TestResolveWebhookSecret_Empty(t *testing.T) {
 	}
 }
 
+func TestResolveEnvFlag_FlagWins(t *testing.T) {
+	t.Parallel()
+	got := resolveEnvFlag("flag-val", "TEST_RESOLVE_KEY_UNUSED")
+	if got != "flag-val" {
+		t.Errorf("got %q, want %q", got, "flag-val")
+	}
+}
+
+func TestResolveEnvFlag_EnvFallback(t *testing.T) {
+	t.Setenv("TEST_RESOLVE_KEY", "env-val")
+	got := resolveEnvFlag("", "TEST_RESOLVE_KEY")
+	if got != "env-val" {
+		t.Errorf("got %q, want %q", got, "env-val")
+	}
+}
+
+func TestResolveEnvFlag_BothEmpty(t *testing.T) {
+	t.Setenv("TEST_RESOLVE_KEY2", "")
+	got := resolveEnvFlag("", "TEST_RESOLVE_KEY2")
+	if got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
+}
+
 func TestServeCmdFlags(t *testing.T) {
 	t.Parallel()
 
@@ -46,7 +70,9 @@ func TestServeCmdFlags(t *testing.T) {
 	}{
 		{"port", "port", "8888"},
 		{"webhook-secret", "webhook-secret", ""},
-		{"repo", "repo", "."},
+		{"workdir", "workdir", "/data/fleet-workdirs"},
+		{"app-id", "app-id", ""},
+		{"app-private-key", "app-private-key", ""},
 		{"label", "label", "fleet"},
 		{"bot-user", "bot-user", ""},
 	}
@@ -62,6 +88,15 @@ func TestServeCmdFlags(t *testing.T) {
 				t.Errorf("flag %q default = %q, want %q", tt.flag, f.DefValue, tt.defValue)
 			}
 		})
+	}
+}
+
+func TestServeCmdFlags_RepoRemoved(t *testing.T) {
+	t.Parallel()
+
+	f := serveCmd.Flags().Lookup("repo")
+	if f != nil {
+		t.Error("--repo flag should have been removed from serve command")
 	}
 }
 
@@ -90,5 +125,65 @@ func TestRunServe_MissingSecret(t *testing.T) {
 	err := runServe(serveCmd, nil)
 	if err == nil {
 		t.Fatal("expected error when webhook secret is missing")
+	}
+}
+
+func TestRunServe_MissingAppID(t *testing.T) {
+	t.Setenv("FLEET_WEBHOOK_SECRET", "test-secret")
+	t.Setenv("FLEET_APP_ID", "")
+
+	old := serveWebhookSecret
+	oldAppID := serveAppID
+	serveWebhookSecret = "test-secret"
+	serveAppID = ""
+	defer func() {
+		serveWebhookSecret = old
+		serveAppID = oldAppID
+	}()
+
+	err := runServe(serveCmd, nil)
+	if err == nil {
+		t.Fatal("expected error when app ID is missing")
+	}
+}
+
+func TestRunServe_MissingPrivateKey(t *testing.T) {
+	t.Setenv("FLEET_WEBHOOK_SECRET", "test-secret")
+	t.Setenv("FLEET_APP_ID", "12345")
+	t.Setenv("FLEET_APP_PRIVATE_KEY_PATH", "")
+
+	old := serveWebhookSecret
+	oldAppID := serveAppID
+	oldPK := serveAppPrivateKey
+	serveWebhookSecret = "test-secret"
+	serveAppID = "12345"
+	serveAppPrivateKey = ""
+	defer func() {
+		serveWebhookSecret = old
+		serveAppID = oldAppID
+		serveAppPrivateKey = oldPK
+	}()
+
+	err := runServe(serveCmd, nil)
+	if err == nil {
+		t.Fatal("expected error when private key is missing")
+	}
+}
+
+func TestRunServe_InvalidAppID(t *testing.T) {
+	t.Setenv("FLEET_WEBHOOK_SECRET", "test-secret")
+
+	old := serveWebhookSecret
+	oldAppID := serveAppID
+	serveWebhookSecret = "test-secret"
+	serveAppID = "not-a-number"
+	defer func() {
+		serveWebhookSecret = old
+		serveAppID = oldAppID
+	}()
+
+	err := runServe(serveCmd, nil)
+	if err == nil {
+		t.Fatal("expected error for invalid app ID")
 	}
 }
