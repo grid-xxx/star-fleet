@@ -27,7 +27,7 @@ type mockGH struct {
 	findPR        func(ctx context.Context, owner, repo, head string) (*gh.PR, error)
 	createPR      func(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*gh.PR, error)
 	mergePR       func(ctx context.Context, owner, repo string, number int) error
-	getPRDiff     func(ctx context.Context, owner, repo string, prNumber int) (string, error)
+	getPRBranches func(ctx context.Context, owner, repo string, prNumber int) (*gh.PRBranches, error)
 	submitReview  func(ctx context.Context, owner, repo string, prNumber int, event, body string) error
 }
 
@@ -70,11 +70,11 @@ func (m *mockGH) MergePR(ctx context.Context, owner, repo string, number int) er
 func (m *mockGH) ClosePR(ctx context.Context, owner, repo string, number int) error {
 	return nil
 }
-func (m *mockGH) GetPRDiff(ctx context.Context, owner, repo string, prNumber int) (string, error) {
-	if m.getPRDiff != nil {
-		return m.getPRDiff(ctx, owner, repo, prNumber)
+func (m *mockGH) GetPRBranches(ctx context.Context, owner, repo string, prNumber int) (*gh.PRBranches, error) {
+	if m.getPRBranches != nil {
+		return m.getPRBranches(ctx, owner, repo, prNumber)
 	}
-	return "+some diff", nil
+	return &gh.PRBranches{Base: "main", Head: "fleet/1"}, nil
 }
 func (m *mockGH) SubmitReview(ctx context.Context, owner, repo string, prNumber int, event, body string) error {
 	if m.submitReview != nil {

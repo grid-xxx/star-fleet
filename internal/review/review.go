@@ -8,11 +8,12 @@ import (
 
 	"github.com/nullne/star-fleet/internal/agent"
 	"github.com/nullne/star-fleet/internal/config"
+	"github.com/nullne/star-fleet/internal/gh"
 )
 
 // GHReview abstracts the GitHub operations needed for code review.
 type GHReview interface {
-	GetPRDiff(ctx context.Context, owner, repo string, prNumber int) (string, error)
+	GetPRBranches(ctx context.Context, owner, repo string, prNumber int) (*gh.PRBranches, error)
 	SubmitReview(ctx context.Context, owner, repo string, prNumber int, event, body string) error
 	PostComment(ctx context.Context, owner, repo string, number int, body string) error
 }
@@ -29,19 +30,16 @@ type ReviewResult struct {
 	Comments string
 }
 
-// Review fetches the PR diff, sends it to the review agent, and posts the review.
+// Review fetches the PR branch names, instructs the review agent to inspect
+// the diff between base and head itself, and returns the review feedback.
 // Returns the number of issues found.
 func (r *Reviewer) Review(ctx context.Context, owner, repo string, prNumber int, cfg *config.ReviewConfig) (string, int, error) {
-	diff, err := r.GH.GetPRDiff(ctx, owner, repo, prNumber)
+	branches, err := r.GH.GetPRBranches(ctx, owner, repo, prNumber)
 	if err != nil {
-		return "", 0, fmt.Errorf("fetching PR diff: %w", err)
+		return "", 0, fmt.Errorf("fetching PR branches: %w", err)
 	}
 
-	if strings.TrimSpace(diff) == "" {
-		return "", 0, nil
-	}
-
-	prompt := buildReviewPrompt(diff, cfg)
+	prompt := buildReviewPrompt(branches.Base, branches.Head, cfg)
 
 	response, err := agent.RunForReview(ctx, r.Agent, "", prompt)
 	if err != nil {
@@ -91,10 +89,10 @@ func countIssues(response string) int {
 	return count
 }
 
-func buildReviewPrompt(diff string, cfg *config.ReviewConfig) string {
+func buildReviewPrompt(base, head string, cfg *config.ReviewConfig) string {
 	if cfg != nil && cfg.PromptFile != "" {
 		if data, err := os.ReadFile(cfg.PromptFile); err == nil {
-			return fmt.Sprintf("%s\n\n## Diff\n\n```diff\n%s\n```", string(data), diff)
+			return fmt.Sprintf("%s\n\n## Branches\n\nReview the changes between base branch `%s` and head branch `%s`.\nUse `git diff %s...%s` to obtain the diff yourself.", string(data), base, head, base, head)
 		}
 	}
 
@@ -102,7 +100,9 @@ func buildReviewPrompt(diff string, cfg *config.ReviewConfig) string {
 
 ## Task
 
-Review the following pull request diff. For each issue found, describe the problem clearly, referencing the specific file and line.
+Review the changes between the base branch %[1]s and the head branch %[2]s.
+
+Use %[3]s to obtain the diff, then review each changed file. For each issue found, describe the problem clearly, referencing the specific file and line.
 
 Only comment on real problems:
 - Logic errors or bugs
@@ -117,8 +117,5 @@ Do NOT comment on things that are fine. Do NOT add praise or filler.
 If there are no issues, respond with exactly: NO_ISSUES
 
 If there are issues, list each one as a bullet point with the file path and line number.
-
-## Diff
-
-`+"```diff\n%s\n```", diff)
+`, "`"+base+"`", "`"+head+"`", "`git diff "+base+"..."+head+"`")
 }

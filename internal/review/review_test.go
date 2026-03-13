@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/nullne/star-fleet/internal/config"
+	"github.com/nullne/star-fleet/internal/gh"
 )
 
 // ---------------------------------------------------------------------------
@@ -15,16 +16,16 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockGHReview struct {
-	getPRDiff    func(ctx context.Context, owner, repo string, prNumber int) (string, error)
-	submitReview func(ctx context.Context, owner, repo string, prNumber int, event, body string) error
-	postComment  func(ctx context.Context, owner, repo string, number int, body string) error
+	getPRBranches func(ctx context.Context, owner, repo string, prNumber int) (*gh.PRBranches, error)
+	submitReview  func(ctx context.Context, owner, repo string, prNumber int, event, body string) error
+	postComment   func(ctx context.Context, owner, repo string, number int, body string) error
 }
 
-func (m *mockGHReview) GetPRDiff(ctx context.Context, owner, repo string, prNumber int) (string, error) {
-	if m.getPRDiff != nil {
-		return m.getPRDiff(ctx, owner, repo, prNumber)
+func (m *mockGHReview) GetPRBranches(ctx context.Context, owner, repo string, prNumber int) (*gh.PRBranches, error) {
+	if m.getPRBranches != nil {
+		return m.getPRBranches(ctx, owner, repo, prNumber)
 	}
-	return "+some diff", nil
+	return &gh.PRBranches{Base: "main", Head: "fleet/1"}, nil
 }
 func (m *mockGHReview) SubmitReview(ctx context.Context, owner, repo string, prNumber int, event, body string) error {
 	if m.submitReview != nil {
@@ -122,33 +123,13 @@ func TestCountIssues(t *testing.T) {
 // Review tests
 // ---------------------------------------------------------------------------
 
-func TestReview_EmptyDiff(t *testing.T) {
+func TestReview_BranchesFetchError(t *testing.T) {
 	t.Parallel()
 	r := &Reviewer{
 		Agent: &mockBackend{},
 		GH: &mockGHReview{
-			getPRDiff: func(ctx context.Context, owner, repo string, prNumber int) (string, error) {
-				return "", nil
-			},
-		},
-	}
-
-	_, issues, err := r.Review(context.Background(), "owner", "repo", 1, defaultCfg())
-	if err != nil {
-		t.Fatalf("Review() error = %v", err)
-	}
-	if issues != 0 {
-		t.Errorf("Review() issues = %d, want 0", issues)
-	}
-}
-
-func TestReview_DiffFetchError(t *testing.T) {
-	t.Parallel()
-	r := &Reviewer{
-		Agent: &mockBackend{},
-		GH: &mockGHReview{
-			getPRDiff: func(ctx context.Context, owner, repo string, prNumber int) (string, error) {
-				return "", errors.New("network error")
+			getPRBranches: func(ctx context.Context, owner, repo string, prNumber int) (*gh.PRBranches, error) {
+				return nil, errors.New("network error")
 			},
 		},
 	}
@@ -157,8 +138,8 @@ func TestReview_DiffFetchError(t *testing.T) {
 	if err == nil {
 		t.Fatal("Review() expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "fetching PR diff") {
-		t.Errorf("expected 'fetching PR diff' in error, got %v", err)
+	if !strings.Contains(err.Error(), "fetching PR branches") {
+		t.Errorf("expected 'fetching PR branches' in error, got %v", err)
 	}
 }
 
@@ -238,31 +219,55 @@ func TestReview_SubmitRequestChangesError(t *testing.T) {
 		},
 	}
 
-	// RunForReview uses workdir="" in our code, but the mock backend gets it.
-	// We need to make sure the workdir passed to RunForReview is usable.
-	// Since our Review() calls RunForReview with workdir="", let's just test
-	// the error path where submitReview fails.
-	// We'll use a different approach: test with a workdir that has the file.
-
-	// Actually, the issue is RunForReview uses the empty string workdir from Review().
-	// Let's just verify the error handling by testing the reviewer directly where
-	// it would get a non-approval response.
-
 	_ = dir
 	_ = r
+}
 
-	// This test validates the error path: when the review agent's response
-	// indicates issues, a REQUEST_CHANGES review is submitted.
-	// Since RunForReview depends on file I/O, we test the higher-level behavior
-	// through the orchestrator tests instead.
+func TestReview_PromptContainsBranches(t *testing.T) {
+	t.Parallel()
+	var capturedPrompt string
+
+	r := &Reviewer{
+		Agent: &mockBackend{
+			run: func(ctx context.Context, workdir string, prompt string, output io.Writer) error {
+				capturedPrompt = prompt
+				return nil
+			},
+		},
+		GH: &mockGHReview{
+			getPRBranches: func(ctx context.Context, owner, repo string, prNumber int) (*gh.PRBranches, error) {
+				return &gh.PRBranches{Base: "main", Head: "fleet/42"}, nil
+			},
+		},
+	}
+
+	_, _, err := r.Review(context.Background(), "owner", "repo", 42, defaultCfg())
+	if err != nil {
+		t.Fatalf("Review() error = %v", err)
+	}
+	if !strings.Contains(capturedPrompt, "main") {
+		t.Error("prompt should contain the base branch name")
+	}
+	if !strings.Contains(capturedPrompt, "fleet/42") {
+		t.Error("prompt should contain the head branch name")
+	}
+	if !strings.Contains(capturedPrompt, "git diff") {
+		t.Error("prompt should instruct the agent to use git diff")
+	}
 }
 
 func TestBuildReviewPrompt_Default(t *testing.T) {
 	t.Parallel()
-	prompt := buildReviewPrompt("diff content here", defaultCfg())
+	prompt := buildReviewPrompt("main", "fleet/1", defaultCfg())
 
-	if !strings.Contains(prompt, "diff content here") {
-		t.Error("prompt should contain the diff")
+	if !strings.Contains(prompt, "main") {
+		t.Error("prompt should contain the base branch")
+	}
+	if !strings.Contains(prompt, "fleet/1") {
+		t.Error("prompt should contain the head branch")
+	}
+	if !strings.Contains(prompt, "git diff") {
+		t.Error("prompt should instruct the agent to use git diff")
 	}
 	if !strings.Contains(prompt, "code review") {
 		t.Error("prompt should mention code review")
@@ -274,9 +279,12 @@ func TestBuildReviewPrompt_Default(t *testing.T) {
 
 func TestBuildReviewPrompt_NilConfig(t *testing.T) {
 	t.Parallel()
-	prompt := buildReviewPrompt("some diff", nil)
-	if !strings.Contains(prompt, "some diff") {
-		t.Error("prompt should contain the diff")
+	prompt := buildReviewPrompt("main", "fleet/1", nil)
+	if !strings.Contains(prompt, "main") {
+		t.Error("prompt should contain the base branch")
+	}
+	if !strings.Contains(prompt, "fleet/1") {
+		t.Error("prompt should contain the head branch")
 	}
 }
 
@@ -286,9 +294,20 @@ func TestBuildReviewPrompt_CustomPromptFile(t *testing.T) {
 		Enabled:    true,
 		PromptFile: "/nonexistent/path.md",
 	}
-	prompt := buildReviewPrompt("diff", cfg)
-	if !strings.Contains(prompt, "diff") {
+	prompt := buildReviewPrompt("main", "fleet/1", cfg)
+	if !strings.Contains(prompt, "main") {
 		t.Error("prompt should fall back to default when prompt file doesn't exist")
+	}
+	if !strings.Contains(prompt, "fleet/1") {
+		t.Error("prompt should contain the head branch")
+	}
+}
+
+func TestBuildReviewPrompt_NoDiffInPrompt(t *testing.T) {
+	t.Parallel()
+	prompt := buildReviewPrompt("main", "fleet/1", defaultCfg())
+	if strings.Contains(prompt, "```diff") {
+		t.Error("prompt should NOT contain an inline diff block")
 	}
 }
 

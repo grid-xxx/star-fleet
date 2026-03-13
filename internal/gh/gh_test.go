@@ -390,6 +390,95 @@ func containsArg(args []string, target string) bool {
 	return false
 }
 
+func TestGetPRBranches(t *testing.T) {
+	tests := []struct {
+		name     string
+		output   string
+		err      error
+		wantBase string
+		wantHead string
+		wantErr  bool
+	}{
+		{
+			name:     "normal branches",
+			output:   `{"baseRefName":"main","headRefName":"fleet/42"}`,
+			wantBase: "main",
+			wantHead: "fleet/42",
+		},
+		{
+			name:     "develop base",
+			output:   `{"baseRefName":"develop","headRefName":"feature/cool-thing"}`,
+			wantBase: "develop",
+			wantHead: "feature/cool-thing",
+		},
+		{
+			name:    "gh command fails",
+			output:  "",
+			err:     fmt.Errorf("gh pr view: exit status 1"),
+			wantErr: true,
+		},
+		{
+			name:    "invalid JSON",
+			output:  "not json",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origRunFn := runFn
+			t.Cleanup(func() { runFn = origRunFn })
+
+			runFn = func(_ context.Context, _ string, args ...string) (string, error) {
+				return tt.output, tt.err
+			}
+
+			branches, err := GetPRBranches(context.Background(), "owner", "repo", 1)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if branches.Base != tt.wantBase {
+				t.Errorf("Base = %q, want %q", branches.Base, tt.wantBase)
+			}
+			if branches.Head != tt.wantHead {
+				t.Errorf("Head = %q, want %q", branches.Head, tt.wantHead)
+			}
+		})
+	}
+}
+
+func TestGetPRBranches_PassesCorrectArgs(t *testing.T) {
+	origRunFn := runFn
+	t.Cleanup(func() { runFn = origRunFn })
+
+	var capturedArgs []string
+	runFn = func(_ context.Context, _ string, args ...string) (string, error) {
+		capturedArgs = args
+		return `{"baseRefName":"main","headRefName":"fleet/7"}`, nil
+	}
+
+	_, err := GetPRBranches(context.Background(), "my-org", "my-repo", 7)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expected := []string{"pr", "view", "7", "--repo", "my-org/my-repo", "--json", "baseRefName,headRefName"}
+	if len(capturedArgs) != len(expected) {
+		t.Fatalf("args = %v, want %v", capturedArgs, expected)
+	}
+	for i, arg := range expected {
+		if capturedArgs[i] != arg {
+			t.Errorf("arg[%d] = %q, want %q", i, capturedArgs[i], arg)
+		}
+	}
+}
+
 func TestParsePRURL(t *testing.T) {
 	tests := []struct {
 		url    string

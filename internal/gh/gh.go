@@ -190,6 +190,28 @@ func GetPRDiff(ctx context.Context, owner, repo string, prNumber int) (string, e
 	return runFn(ctx, "", "pr", "diff", strconv.Itoa(prNumber), "--repo", nwo)
 }
 
+// PRBranches holds the base and head branch names for a pull request.
+type PRBranches struct {
+	Base string `json:"baseRefName"`
+	Head string `json:"headRefName"`
+}
+
+// GetPRBranches returns the base and head branch names for a pull request.
+func GetPRBranches(ctx context.Context, owner, repo string, prNumber int) (*PRBranches, error) {
+	nwo := owner + "/" + repo
+	out, err := runFn(ctx, "", "pr", "view", strconv.Itoa(prNumber),
+		"--repo", nwo,
+		"--json", "baseRefName,headRefName")
+	if err != nil {
+		return nil, fmt.Errorf("fetching PR branches: %w", err)
+	}
+	var b PRBranches
+	if err := json.Unmarshal([]byte(out), &b); err != nil {
+		return nil, fmt.Errorf("parsing PR branches: %w", err)
+	}
+	return &b, nil
+}
+
 // GetAuthenticatedUser returns the login of the currently authenticated GitHub user.
 func GetAuthenticatedUser(ctx context.Context) (string, error) {
 	out, err := runFn(ctx, "", "api", "user", "--jq", ".login")

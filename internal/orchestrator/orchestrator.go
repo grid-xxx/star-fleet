@@ -25,7 +25,7 @@ type GHClient interface {
 	CreatePR(ctx context.Context, owner, repo, workdir, title, body, base, head string) (*gh.PR, error)
 	MergePR(ctx context.Context, owner, repo string, number int) error
 	ClosePR(ctx context.Context, owner, repo string, number int) error
-	GetPRDiff(ctx context.Context, owner, repo string, prNumber int) (string, error)
+	GetPRBranches(ctx context.Context, owner, repo string, prNumber int) (*gh.PRBranches, error)
 	SubmitReview(ctx context.Context, owner, repo string, prNumber int, event, body string) error
 }
 
@@ -86,8 +86,8 @@ func (defaultGH) MergePR(ctx context.Context, owner, repo string, number int) er
 func (defaultGH) ClosePR(ctx context.Context, owner, repo string, number int) error {
 	return gh.ClosePR(ctx, owner, repo, number)
 }
-func (defaultGH) GetPRDiff(ctx context.Context, owner, repo string, prNumber int) (string, error) {
-	return gh.GetPRDiff(ctx, owner, repo, prNumber)
+func (defaultGH) GetPRBranches(ctx context.Context, owner, repo string, prNumber int) (*gh.PRBranches, error) {
+	return gh.GetPRBranches(ctx, owner, repo, prNumber)
 }
 func (defaultGH) SubmitReview(ctx context.Context, owner, repo string, prNumber int, event, body string) error {
 	return gh.SubmitReview(ctx, owner, repo, prNumber, event, body)
