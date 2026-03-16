@@ -8,6 +8,7 @@ import (
 	"github.com/nullne/star-fleet/internal/agent"
 	"github.com/nullne/star-fleet/internal/config"
 	"github.com/nullne/star-fleet/internal/gh"
+	"github.com/nullne/star-fleet/internal/ghapp"
 	"github.com/nullne/star-fleet/internal/git"
 	"github.com/nullne/star-fleet/internal/notify"
 	"github.com/nullne/star-fleet/internal/review"
@@ -143,7 +144,21 @@ func (d defaultReview) Review(ctx context.Context, owner, repo string, prNumber 
 	if err != nil {
 		return "", 0, err
 	}
-	r := &review.Reviewer{Agent: b, GH: d.gh}
+
+	// Use the GitHub App API client when credentials are configured;
+	// otherwise fall back to the gh CLI wrapper.
+	var ghReview review.GHReview
+	if cfg.AppID != 0 && cfg.AppKeyFile != "" {
+		appClient, err := ghapp.NewClient(cfg.AppID, cfg.AppKeyFile)
+		if err != nil {
+			return "", 0, fmt.Errorf("creating GitHub App client for review: %w", err)
+		}
+		ghReview = &gh.APIReviewClient{Token: appClient.InstallationToken}
+	} else {
+		ghReview = d.gh
+	}
+
+	r := &review.Reviewer{Agent: b, GH: ghReview}
 	return r.Review(ctx, owner, repo, prNumber, cfg)
 }
 

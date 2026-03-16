@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -437,6 +438,115 @@ func TestTelegramEnvVarWithoutFile(t *testing.T) {
 	}
 	if cfg.Telegram.ChatID != "env-only-chat" {
 		t.Errorf("telegram.chat_id = %q, want %q", cfg.Telegram.ChatID, "env-only-chat")
+	}
+}
+
+func TestReviewAppDefaults(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Review.AppID != 0 {
+		t.Errorf("review.app_id should default to 0, got %d", cfg.Review.AppID)
+	}
+	if cfg.Review.AppKeyFile != "" {
+		t.Errorf("review.app_key_file should default to empty, got %q", cfg.Review.AppKeyFile)
+	}
+}
+
+func TestLoadReviewAppConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgDir := filepath.Join(dir, ".fleet")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	data := `[agent]
+backend = "claude-code"
+
+[review]
+enabled = true
+app_id = 12345
+app_key_file = "/path/to/app.pem"
+`
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Review.AppID != 12345 {
+		t.Errorf("review.app_id = %d, want 12345", cfg.Review.AppID)
+	}
+	if cfg.Review.AppKeyFile != "/path/to/app.pem" {
+		t.Errorf("review.app_key_file = %q, want %q", cfg.Review.AppKeyFile, "/path/to/app.pem")
+	}
+}
+
+func TestReviewAppEnvVarOverride(t *testing.T) {
+	dir := t.TempDir()
+	cfgDir := filepath.Join(dir, ".fleet")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	data := `[agent]
+backend = "claude-code"
+
+[review]
+app_id = 111
+app_key_file = "/file/path.pem"
+`
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("FLEET_REVIEW_APP_ID", "999")
+	t.Setenv("FLEET_REVIEW_APP_KEY", "/env/path.pem")
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Review.AppID != 999 {
+		t.Errorf("review.app_id = %d, want env override 999", cfg.Review.AppID)
+	}
+	if cfg.Review.AppKeyFile != "/env/path.pem" {
+		t.Errorf("review.app_key_file = %q, want env override %q", cfg.Review.AppKeyFile, "/env/path.pem")
+	}
+}
+
+func TestReviewAppEnvVarWithoutFile(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Setenv("FLEET_REVIEW_APP_ID", "42")
+	t.Setenv("FLEET_REVIEW_APP_KEY", "/env/only.pem")
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Review.AppID != 42 {
+		t.Errorf("review.app_id = %d, want 42", cfg.Review.AppID)
+	}
+	if cfg.Review.AppKeyFile != "/env/only.pem" {
+		t.Errorf("review.app_key_file = %q, want %q", cfg.Review.AppKeyFile, "/env/only.pem")
+	}
+}
+
+func TestReviewAppEnvVarInvalidID(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLEET_REVIEW_APP_ID", "not-a-number")
+
+	_, err := Load(dir)
+	if err == nil {
+		t.Fatal("expected error for non-numeric FLEET_REVIEW_APP_ID")
+	}
+	if !strings.Contains(err.Error(), "FLEET_REVIEW_APP_ID") {
+		t.Errorf("error = %v, want to mention FLEET_REVIEW_APP_ID", err)
 	}
 }
 

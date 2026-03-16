@@ -3,8 +3,9 @@ package config
 import (
 	"fmt"
 	"os"
-	"strings"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -46,6 +47,12 @@ type ReviewConfig struct {
 	Backend    string `toml:"backend"`
 	PromptFile string `toml:"prompt_file"`
 	Name       string `toml:"name"` // display name in logs
+
+	// GitHub App credentials for submitting reviews as a bot identity.
+	// If both are set, reviews are posted via the GitHub API using an
+	// installation token; otherwise we fall back to the gh CLI.
+	AppID      int64  `toml:"app_id"`
+	AppKeyFile string `toml:"app_key_file"`
 }
 
 type TelegramConfig struct {
@@ -109,6 +116,17 @@ func Load(repoRoot string) (*Config, error) {
 	}
 	if v := os.Getenv("FLEET_TELEGRAM_CHAT_ID"); v != "" {
 		cfg.Telegram.ChatID = v
+	}
+
+	if v := os.Getenv("FLEET_REVIEW_APP_ID"); v != "" {
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parsing FLEET_REVIEW_APP_ID: %w", err)
+		}
+		cfg.Review.AppID = id
+	}
+	if v := os.Getenv("FLEET_REVIEW_APP_KEY"); v != "" {
+		cfg.Review.AppKeyFile = v
 	}
 
 	switch cfg.Agent.Backend {
