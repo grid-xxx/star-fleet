@@ -321,6 +321,195 @@ func TestAPIReviewClient_URLConstruction(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// CreateCheckRun tests
+// ---------------------------------------------------------------------------
+
+func TestAPIReviewClient_CreateCheckRun(t *testing.T) {
+	t.Parallel()
+
+	var capturedBody createCheckRunRequest
+	var capturedMethod string
+	var capturedPath string
+	var capturedAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedMethod = r.Method
+		capturedPath = r.URL.Path
+		capturedAuth = r.Header.Get("Authorization")
+		json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"id":42}`))
+	}))
+	defer srv.Close()
+
+	c := &APIReviewClient{Token: staticToken("ghs_test"), BaseURL: srv.URL}
+	id, err := c.CreateCheckRun(context.Background(), "my-org", "my-repo", "Fleet Test", "abc123", "in_progress")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != 42 {
+		t.Errorf("id = %d, want 42", id)
+	}
+	if capturedMethod != "POST" {
+		t.Errorf("method = %s, want POST", capturedMethod)
+	}
+	if capturedPath != "/repos/my-org/my-repo/check-runs" {
+		t.Errorf("path = %q, want /repos/my-org/my-repo/check-runs", capturedPath)
+	}
+	if capturedAuth != "Bearer ghs_test" {
+		t.Errorf("auth = %q, want Bearer ghs_test", capturedAuth)
+	}
+	if capturedBody.Name != "Fleet Test" {
+		t.Errorf("name = %q, want Fleet Test", capturedBody.Name)
+	}
+	if capturedBody.HeadSHA != "abc123" {
+		t.Errorf("head_sha = %q, want abc123", capturedBody.HeadSHA)
+	}
+	if capturedBody.Status != "in_progress" {
+		t.Errorf("status = %q, want in_progress", capturedBody.Status)
+	}
+}
+
+func TestAPIReviewClient_CreateCheckRun_ServerError(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		w.Write([]byte(`{"message":"Validation Failed"}`))
+	}))
+	defer srv.Close()
+
+	c := &APIReviewClient{Token: staticToken("tok"), BaseURL: srv.URL}
+	_, err := c.CreateCheckRun(context.Background(), "owner", "repo", "test", "sha", "in_progress")
+	if err == nil {
+		t.Fatal("expected error for 422 response")
+	}
+	if !strings.Contains(err.Error(), "422") {
+		t.Errorf("error = %v, want to contain 422", err)
+	}
+}
+
+func TestAPIReviewClient_CreateCheckRun_TokenError(t *testing.T) {
+	t.Parallel()
+
+	tokenFn := func(owner string) (string, error) {
+		return "", fmt.Errorf("no token")
+	}
+	c := &APIReviewClient{Token: tokenFn, BaseURL: "http://unused"}
+	_, err := c.CreateCheckRun(context.Background(), "owner", "repo", "test", "sha", "in_progress")
+	if err == nil {
+		t.Fatal("expected error when token func fails")
+	}
+	if !strings.Contains(err.Error(), "installation token") {
+		t.Errorf("error = %v, want to mention installation token", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// UpdateCheckRun tests
+// ---------------------------------------------------------------------------
+
+func TestAPIReviewClient_UpdateCheckRun(t *testing.T) {
+	t.Parallel()
+
+	var capturedBody updateCheckRunRequest
+	var capturedMethod string
+	var capturedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedMethod = r.Method
+		capturedPath = r.URL.Path
+		json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":42}`))
+	}))
+	defer srv.Close()
+
+	c := &APIReviewClient{Token: staticToken("tok"), BaseURL: srv.URL}
+	output := &CheckRunOutput{
+		Title:   "Fleet Test — All Passed",
+		Summary: "All tests passed",
+		Text:    "## Report\nAll good",
+	}
+	err := c.UpdateCheckRun(context.Background(), "my-org", "my-repo", 42, "completed", "success", output)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedMethod != "PATCH" {
+		t.Errorf("method = %s, want PATCH", capturedMethod)
+	}
+	if capturedPath != "/repos/my-org/my-repo/check-runs/42" {
+		t.Errorf("path = %q, want /repos/my-org/my-repo/check-runs/42", capturedPath)
+	}
+	if capturedBody.Status != "completed" {
+		t.Errorf("status = %q, want completed", capturedBody.Status)
+	}
+	if capturedBody.Conclusion != "success" {
+		t.Errorf("conclusion = %q, want success", capturedBody.Conclusion)
+	}
+	if capturedBody.Output == nil {
+		t.Fatal("output is nil, want non-nil")
+	}
+	if capturedBody.Output.Title != "Fleet Test — All Passed" {
+		t.Errorf("output.title = %q, want 'Fleet Test — All Passed'", capturedBody.Output.Title)
+	}
+	if capturedBody.Output.Text != "## Report\nAll good" {
+		t.Errorf("output.text = %q, want '## Report\\nAll good'", capturedBody.Output.Text)
+	}
+}
+
+func TestAPIReviewClient_UpdateCheckRun_Failure(t *testing.T) {
+	t.Parallel()
+
+	var capturedBody updateCheckRunRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":99}`))
+	}))
+	defer srv.Close()
+
+	c := &APIReviewClient{Token: staticToken("tok"), BaseURL: srv.URL}
+	err := c.UpdateCheckRun(context.Background(), "owner", "repo", 99, "completed", "failure", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedBody.Conclusion != "failure" {
+		t.Errorf("conclusion = %q, want failure", capturedBody.Conclusion)
+	}
+}
+
+func TestAPIReviewClient_UpdateCheckRun_ServerError(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"message":"internal error"}`))
+	}))
+	defer srv.Close()
+
+	c := &APIReviewClient{Token: staticToken("tok"), BaseURL: srv.URL}
+	err := c.UpdateCheckRun(context.Background(), "owner", "repo", 1, "completed", "success", nil)
+	if err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("error = %v, want to contain 500", err)
+	}
+}
+
+func TestAPIReviewClient_UpdateCheckRun_TokenError(t *testing.T) {
+	t.Parallel()
+
+	tokenFn := func(owner string) (string, error) {
+		return "", fmt.Errorf("no token")
+	}
+	c := &APIReviewClient{Token: tokenFn, BaseURL: "http://unused"}
+	err := c.UpdateCheckRun(context.Background(), "owner", "repo", 1, "completed", "success", nil)
+	if err == nil {
+		t.Fatal("expected error when token func fails")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Interface compliance
 // ---------------------------------------------------------------------------
 
@@ -330,4 +519,6 @@ var _ interface {
 	GetPRBranches(ctx context.Context, owner, repo string, prNumber int) (*PRBranches, error)
 	SubmitReview(ctx context.Context, owner, repo string, prNumber int, event, body string) error
 	PostComment(ctx context.Context, owner, repo string, number int, body string) error
+	CreateCheckRun(ctx context.Context, owner, repo, name, headSHA, status string) (int64, error)
+	UpdateCheckRun(ctx context.Context, owner, repo string, checkRunID int64, status, conclusion string, output *CheckRunOutput) error
 } = (*APIReviewClient)(nil)

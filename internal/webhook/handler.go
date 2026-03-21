@@ -11,7 +11,7 @@ import (
 // Runner abstracts the fleet pipeline execution, allowing injection for testing.
 type Runner interface {
 	Run(owner, repo string, number int) error
-	Test(owner, repo string, prNumber int) error
+	Test(owner, repo, headSHA string, prNumber int) error
 }
 
 // Handler routes GitHub webhook events to the fleet pipeline.
@@ -84,8 +84,13 @@ type pullRequestPayload struct {
 }
 
 type payloadPR struct {
-	Number int    `json:"number"`
-	Title  string `json:"title"`
+	Number int          `json:"number"`
+	Title  string       `json:"title"`
+	Head   payloadPRRef `json:"head"`
+}
+
+type payloadPRRef struct {
+	SHA string `json:"sha"`
 }
 
 type payloadLabel struct {
@@ -182,11 +187,13 @@ func (h *Handler) handlePullRequest(payload []byte) (string, error) {
 		prNumber = p.PullRequest.Number
 	}
 
-	log.Printf("handler: pull_request #%d action=%q — triggering test", prNumber, p.Action)
-	return h.tryTest(p.Repo.Owner.Login, p.Repo.Name, prNumber)
+	headSHA := p.PullRequest.Head.SHA
+
+	log.Printf("handler: pull_request #%d action=%q sha=%s — triggering test", prNumber, p.Action, headSHA)
+	return h.tryTest(p.Repo.Owner.Login, p.Repo.Name, headSHA, prNumber)
 }
 
-func (h *Handler) tryTest(owner, repo string, prNumber int) (string, error) {
+func (h *Handler) tryTest(owner, repo, headSHA string, prNumber int) (string, error) {
 	key := repoKey(owner, repo)
 
 	h.mu.Lock()
@@ -209,7 +216,7 @@ func (h *Handler) tryTest(owner, repo string, prNumber int) (string, error) {
 		}()
 
 		log.Printf("handler: starting fleet test for %s#%d", key, prNumber)
-		if err := h.runner.Test(owner, repo, prNumber); err != nil {
+		if err := h.runner.Test(owner, repo, headSHA, prNumber); err != nil {
 			log.Printf("handler: fleet test failed for %s#%d: %v", key, prNumber, err)
 			return
 		}
