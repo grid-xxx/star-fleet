@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strconv"
 	"syscall"
@@ -175,6 +176,18 @@ func (r *pipelineRunner) Test(owner, repo string, prNumber int) error {
 	ctx := context.Background()
 
 	repoRoot, err := r.cache.Ensure(ctx, owner, repo)
+	if err == nil {
+		// Fetch and checkout the PR branch specifically for testing
+		prRef := fmt.Sprintf("pull/%d/head", prNumber)
+		fetchCmd := exec.CommandContext(ctx, "git", "fetch", "origin", prRef)
+		fetchCmd.Dir = repoRoot
+		fetchCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		_ = fetchCmd.Run()
+
+		checkoutCmd := exec.CommandContext(ctx, "git", "checkout", "FETCH_HEAD")
+		checkoutCmd.Dir = repoRoot
+		_ = checkoutCmd.Run()
+	}
 	if err != nil {
 		return fmt.Errorf("ensuring repo clone: %w", err)
 	}
