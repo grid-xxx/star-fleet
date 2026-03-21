@@ -26,6 +26,7 @@ type runCall struct {
 type testCall struct {
 	Owner    string
 	Repo     string
+	HeadSHA  string
 	PRNumber int
 }
 
@@ -55,12 +56,12 @@ func (r *stubRunner) Run(owner, repo string, number int) error {
 	return r.err
 }
 
-func (r *stubRunner) Test(owner, repo string, prNumber int) error {
+func (r *stubRunner) Test(owner, repo, headSHA string, prNumber int) error {
 	if r.blockCh != nil {
 		<-r.blockCh
 	}
 	r.mu.Lock()
-	r.testCalls = append(r.testCalls, testCall{owner, repo, prNumber})
+	r.testCalls = append(r.testCalls, testCall{owner, repo, headSHA, prNumber})
 	r.mu.Unlock()
 	if r.doneCh != nil {
 		r.doneCh <- struct{}{}
@@ -590,7 +591,7 @@ func TestHandlePullRequest_Opened(t *testing.T) {
 	p := pullRequestPayload{
 		Action:      "opened",
 		Number:      42,
-		PullRequest: payloadPR{Number: 42, Title: "feat: new thing"},
+		PullRequest: payloadPR{Number: 42, Title: "feat: new thing", Head: payloadPRRef{SHA: "abc123"}},
 		Sender:      payloadUser{Login: "alice", Type: "User"},
 		Repo:        payloadRepo{Name: "star-fleet"},
 	}
@@ -614,6 +615,9 @@ func TestHandlePullRequest_Opened(t *testing.T) {
 	if calls[0].Owner != "nullne" || calls[0].Repo != "star-fleet" || calls[0].PRNumber != 42 {
 		t.Errorf("call = %+v, want {nullne star-fleet 42}", calls[0])
 	}
+	if calls[0].HeadSHA != "abc123" {
+		t.Errorf("HeadSHA = %q, want %q", calls[0].HeadSHA, "abc123")
+	}
 }
 
 func TestHandlePullRequest_Synchronize(t *testing.T) {
@@ -625,7 +629,7 @@ func TestHandlePullRequest_Synchronize(t *testing.T) {
 	p := pullRequestPayload{
 		Action:      "synchronize",
 		Number:      15,
-		PullRequest: payloadPR{Number: 15, Title: "fix: something"},
+		PullRequest: payloadPR{Number: 15, Title: "fix: something", Head: payloadPRRef{SHA: "def456"}},
 		Sender:      payloadUser{Login: "bob", Type: "User"},
 		Repo:        payloadRepo{Name: "repo"},
 	}
@@ -648,6 +652,9 @@ func TestHandlePullRequest_Synchronize(t *testing.T) {
 	}
 	if calls[0].PRNumber != 15 {
 		t.Errorf("PRNumber = %d, want 15", calls[0].PRNumber)
+	}
+	if calls[0].HeadSHA != "def456" {
+		t.Errorf("HeadSHA = %q, want %q", calls[0].HeadSHA, "def456")
 	}
 }
 
@@ -682,7 +689,7 @@ func TestHandlePullRequest_BotSender(t *testing.T) {
 	p := pullRequestPayload{
 		Action:      "opened",
 		Number:      10,
-		PullRequest: payloadPR{Number: 10},
+		PullRequest: payloadPR{Number: 10, Head: payloadPRRef{SHA: "sha1"}},
 		Sender:      payloadUser{Login: "my-bot[bot]", Type: "Bot"},
 	}
 	body, _ := json.Marshal(p)
@@ -705,7 +712,7 @@ func TestHandlePullRequest_BotType(t *testing.T) {
 	p := pullRequestPayload{
 		Action:      "synchronize",
 		Number:      3,
-		PullRequest: payloadPR{Number: 3},
+		PullRequest: payloadPR{Number: 3, Head: payloadPRRef{SHA: "sha2"}},
 		Sender:      payloadUser{Login: "dependabot[bot]", Type: "Bot"},
 	}
 	body, _ := json.Marshal(p)
@@ -729,7 +736,7 @@ func TestHandlePullRequest_FallbackToPRNumberField(t *testing.T) {
 	p := pullRequestPayload{
 		Action:      "opened",
 		Number:      0,
-		PullRequest: payloadPR{Number: 99},
+		PullRequest: payloadPR{Number: 99, Head: payloadPRRef{SHA: "sha99"}},
 		Sender:      payloadUser{Login: "alice", Type: "User"},
 		Repo:        payloadRepo{Name: "r"},
 	}
@@ -766,7 +773,7 @@ func TestTryTest_RejectWhenBusy_SameRepo(t *testing.T) {
 	p1 := pullRequestPayload{
 		Action:      "opened",
 		Number:      1,
-		PullRequest: payloadPR{Number: 1},
+		PullRequest: payloadPR{Number: 1, Head: payloadPRRef{SHA: "sha1"}},
 		Sender:      payloadUser{Login: "alice", Type: "User"},
 		Repo:        payloadRepo{Name: "r"},
 	}
@@ -787,7 +794,7 @@ func TestTryTest_RejectWhenBusy_SameRepo(t *testing.T) {
 	p2 := pullRequestPayload{
 		Action:      "opened",
 		Number:      2,
-		PullRequest: payloadPR{Number: 2},
+		PullRequest: payloadPR{Number: 2, Head: payloadPRRef{SHA: "sha2"}},
 		Sender:      payloadUser{Login: "bob", Type: "User"},
 		Repo:        payloadRepo{Name: "r"},
 	}
@@ -820,7 +827,7 @@ func TestTryTest_AllowDifferentReposInParallel(t *testing.T) {
 	p1 := pullRequestPayload{
 		Action:      "opened",
 		Number:      1,
-		PullRequest: payloadPR{Number: 1},
+		PullRequest: payloadPR{Number: 1, Head: payloadPRRef{SHA: "sha1"}},
 		Sender:      payloadUser{Login: "alice", Type: "User"},
 		Repo:        payloadRepo{Name: "repo-a"},
 	}
@@ -840,7 +847,7 @@ func TestTryTest_AllowDifferentReposInParallel(t *testing.T) {
 	p2 := pullRequestPayload{
 		Action:      "opened",
 		Number:      2,
-		PullRequest: payloadPR{Number: 2},
+		PullRequest: payloadPR{Number: 2, Head: payloadPRRef{SHA: "sha2"}},
 		Sender:      payloadUser{Login: "bob", Type: "User"},
 		Repo:        payloadRepo{Name: "repo-b"},
 	}
@@ -897,7 +904,7 @@ func TestTryTest_IndependentFromTryRun(t *testing.T) {
 	p2 := pullRequestPayload{
 		Action:      "opened",
 		Number:      5,
-		PullRequest: payloadPR{Number: 5},
+		PullRequest: payloadPR{Number: 5, Head: payloadPRRef{SHA: "sha5"}},
 		Sender:      payloadUser{Login: "bob", Type: "User"},
 		Repo:        payloadRepo{Name: "r"},
 	}

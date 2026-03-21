@@ -175,6 +175,120 @@ func (c *APIReviewClient) PostComment(ctx context.Context, owner, repo string, n
 	return nil
 }
 
+// CheckRunOutput holds the output fields for a check run.
+type CheckRunOutput struct {
+	Title   string `json:"title"`
+	Summary string `json:"summary"`
+	Text    string `json:"text,omitempty"`
+}
+
+// createCheckRunRequest is the JSON body for POST /repos/{owner}/{repo}/check-runs.
+type createCheckRunRequest struct {
+	Name    string          `json:"name"`
+	HeadSHA string          `json:"head_sha"`
+	Status  string          `json:"status,omitempty"`
+	Output  *CheckRunOutput `json:"output,omitempty"`
+}
+
+// updateCheckRunRequest is the JSON body for PATCH /repos/{owner}/{repo}/check-runs/{id}.
+type updateCheckRunRequest struct {
+	Status     string          `json:"status,omitempty"`
+	Conclusion string          `json:"conclusion,omitempty"`
+	Output     *CheckRunOutput `json:"output,omitempty"`
+}
+
+// createCheckRunResponse captures the id returned by the API.
+type createCheckRunResponse struct {
+	ID int64 `json:"id"`
+}
+
+// CreateCheckRun creates a new check run on the given commit SHA.
+// It returns the check run ID. status is typically "in_progress" or "queued".
+func (c *APIReviewClient) CreateCheckRun(ctx context.Context, owner, repo, name, headSHA, status string) (int64, error) {
+	token, err := c.Token(owner)
+	if err != nil {
+		return 0, fmt.Errorf("obtaining installation token: %w", err)
+	}
+
+	reqBody := createCheckRunRequest{
+		Name:    name,
+		HeadSHA: headSHA,
+		Status:  status,
+	}
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return 0, fmt.Errorf("marshaling check run request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/repos/%s/%s/check-runs", c.baseURL(), owner, repo)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonData))
+	if err != nil {
+		return 0, fmt.Errorf("creating check run request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("creating check run: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("check run API HTTP %d: %s", resp.StatusCode, respBody)
+	}
+
+	var result createCheckRunResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, fmt.Errorf("decoding check run response: %w", err)
+	}
+	return result.ID, nil
+}
+
+// UpdateCheckRun updates an existing check run to the given status/conclusion.
+// conclusion should be set when status is "completed" (e.g. "success", "failure").
+// output is optional and can embed a Markdown summary.
+func (c *APIReviewClient) UpdateCheckRun(ctx context.Context, owner, repo string, checkRunID int64, status, conclusion string, output *CheckRunOutput) error {
+	token, err := c.Token(owner)
+	if err != nil {
+		return fmt.Errorf("obtaining installation token: %w", err)
+	}
+
+	reqBody := updateCheckRunRequest{
+		Status:     status,
+		Conclusion: conclusion,
+		Output:     output,
+	}
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("marshaling check run update: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/repos/%s/%s/check-runs/%d", c.baseURL(), owner, repo, checkRunID)
+	req, err := http.NewRequestWithContext(ctx, "PATCH", url, bytes.NewReader(jsonData))
+	if err != nil {
+		return fmt.Errorf("creating check run update request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return fmt.Errorf("updating check run: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("check run update API HTTP %d: %s", resp.StatusCode, respBody)
+	}
+
+	return nil
+}
+
 // isOwnPRAPIError checks if an API error message indicates that the bot
 // tried to request changes on its own PR.
 func isOwnPRAPIError(msg string) bool {

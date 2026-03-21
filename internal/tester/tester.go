@@ -17,6 +17,21 @@ type GHCommenter interface {
 	PostComment(ctx context.Context, owner, repo string, number int, body string) error
 }
 
+// CheckRunUpdater updates a GitHub Check Run status and output.
+type CheckRunUpdater interface {
+	// UpdateCheckRun updates a check run to the given status/conclusion with
+	// an optional output payload. conclusion should be set when status is
+	// "completed" (e.g. "success" or "failure").
+	UpdateCheckRun(ctx context.Context, owner, repo string, checkRunID int64, status, conclusion string, output *CheckRunOutput) error
+}
+
+// CheckRunOutput holds the output fields for a GitHub Check Run.
+type CheckRunOutput struct {
+	Title   string
+	Summary string
+	Text    string
+}
+
 // Logger abstracts log output for the tester.
 type Logger interface {
 	Info(msg string)
@@ -48,6 +63,12 @@ type Config struct {
 
 	// Runner executes test commands. If nil, defaults to ExecRunner.
 	Runner CommandRunner
+
+	// CheckRun optionally updates a GitHub Check Run on completion.
+	CheckRun CheckRunUpdater
+
+	// CheckRunID is the ID of the check run to update. Only used when CheckRun is set.
+	CheckRunID int64
 
 	// Logger for status output. If nil, output is suppressed.
 	Log Logger
@@ -131,6 +152,30 @@ func Run(ctx context.Context, cfg *Config) (*Report, error) {
 			log.Warn(fmt.Sprintf("Failed to post PR comment: %v", err))
 		} else {
 			log.Info(fmt.Sprintf("Posted report to PR #%d", cfg.PRNumber))
+		}
+	}
+
+	// Step 6: Update Check Run if configured
+	if cfg.CheckRun != nil && cfg.CheckRunID != 0 && cfg.Owner != "" && cfg.Repo != "" {
+		conclusion := "success"
+		title := "Fleet Test — All Passed"
+		if !report.AllPassed {
+			conclusion = "failure"
+			title = fmt.Sprintf("Fleet Test — %d/%d modules failed",
+				report.FailedModules+report.ErrorModules, report.TotalModules)
+		}
+
+		markdown := report.FormatMarkdown()
+		output := &CheckRunOutput{
+			Title:   title,
+			Summary: title,
+			Text:    markdown,
+		}
+
+		if err := cfg.CheckRun.UpdateCheckRun(ctx, cfg.Owner, cfg.Repo, cfg.CheckRunID, "completed", conclusion, output); err != nil {
+			log.Warn(fmt.Sprintf("Failed to update check run: %v", err))
+		} else {
+			log.Info(fmt.Sprintf("Updated check run to %s", conclusion))
 		}
 	}
 

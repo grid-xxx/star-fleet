@@ -809,6 +809,213 @@ func TestBuildTestGenPrompt_ContainsDoNotModifyImpl(t *testing.T) {
 	}
 }
 
+// --- CheckRunUpdater tests ---
+
+type mockCheckRunUpdater struct {
+	updateCheckRun func(ctx context.Context, owner, repo string, checkRunID int64, status, conclusion string, output *CheckRunOutput) error
+}
+
+func (m *mockCheckRunUpdater) UpdateCheckRun(ctx context.Context, owner, repo string, checkRunID int64, status, conclusion string, output *CheckRunOutput) error {
+	if m.updateCheckRun != nil {
+		return m.updateCheckRun(ctx, owner, repo, checkRunID, status, conclusion, output)
+	}
+	return nil
+}
+
+func TestRun_UpdatesCheckRun_Success(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	modDir := filepath.Join(dir, "pkg")
+	mustMkdir(t, filepath.Join(modDir, "skills"))
+	mustWrite(t, filepath.Join(modDir, "tests.md"), "# Tests\n")
+	mustWrite(t, filepath.Join(modDir, "skills", "usage.md"), "# Usage\n")
+
+	runner := &mockRunner{
+		run: func(ctx context.Context, dir string, name string, args ...string) (string, error) {
+			return "PASS\n", nil
+		},
+	}
+
+	var updatedConclusion string
+	var updatedStatus string
+	var updatedOutput *CheckRunOutput
+	var updatedCheckRunID int64
+	cr := &mockCheckRunUpdater{
+		updateCheckRun: func(ctx context.Context, owner, repo string, checkRunID int64, status, conclusion string, output *CheckRunOutput) error {
+			updatedCheckRunID = checkRunID
+			updatedStatus = status
+			updatedConclusion = conclusion
+			updatedOutput = output
+			return nil
+		},
+	}
+
+	cfg := &Config{
+		RepoRoot:   dir,
+		Runner:     runner,
+		Owner:      "org",
+		Repo:       "repo",
+		PRNumber:   10,
+		CheckRun:   cr,
+		CheckRunID: 42,
+		Log:        &recordingLogger{},
+	}
+
+	report, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !report.AllPassed {
+		t.Error("AllPassed = false, want true")
+	}
+	if updatedCheckRunID != 42 {
+		t.Errorf("check run ID = %d, want 42", updatedCheckRunID)
+	}
+	if updatedStatus != "completed" {
+		t.Errorf("status = %q, want completed", updatedStatus)
+	}
+	if updatedConclusion != "success" {
+		t.Errorf("conclusion = %q, want success", updatedConclusion)
+	}
+	if updatedOutput == nil {
+		t.Fatal("output is nil, want non-nil")
+	}
+	if !strings.Contains(updatedOutput.Text, "Fleet Test Report") {
+		t.Error("output.text should contain the Markdown report")
+	}
+}
+
+func TestRun_UpdatesCheckRun_Failure(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	modDir := filepath.Join(dir, "pkg")
+	mustMkdir(t, filepath.Join(modDir, "skills"))
+	mustWrite(t, filepath.Join(modDir, "tests.md"), "# Tests\n")
+	mustWrite(t, filepath.Join(modDir, "skills", "usage.md"), "# Usage\n")
+
+	runner := &mockRunner{
+		run: func(ctx context.Context, dir string, name string, args ...string) (string, error) {
+			return "FAIL\n", &exitError{code: 1}
+		},
+	}
+
+	var updatedConclusion string
+	cr := &mockCheckRunUpdater{
+		updateCheckRun: func(ctx context.Context, owner, repo string, checkRunID int64, status, conclusion string, output *CheckRunOutput) error {
+			updatedConclusion = conclusion
+			return nil
+		},
+	}
+
+	cfg := &Config{
+		RepoRoot:   dir,
+		Runner:     runner,
+		Owner:      "org",
+		Repo:       "repo",
+		PRNumber:   10,
+		CheckRun:   cr,
+		CheckRunID: 99,
+		Log:        &recordingLogger{},
+	}
+
+	report, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if report.AllPassed {
+		t.Error("AllPassed = true, want false")
+	}
+	if updatedConclusion != "failure" {
+		t.Errorf("conclusion = %q, want failure", updatedConclusion)
+	}
+}
+
+func TestRun_CheckRunUpdateError_DoesNotFail(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	modDir := filepath.Join(dir, "pkg")
+	mustMkdir(t, filepath.Join(modDir, "skills"))
+	mustWrite(t, filepath.Join(modDir, "tests.md"), "# Tests\n")
+	mustWrite(t, filepath.Join(modDir, "skills", "usage.md"), "# Usage\n")
+
+	runner := &mockRunner{
+		run: func(ctx context.Context, dir string, name string, args ...string) (string, error) {
+			return "PASS\n", nil
+		},
+	}
+
+	cr := &mockCheckRunUpdater{
+		updateCheckRun: func(ctx context.Context, owner, repo string, checkRunID int64, status, conclusion string, output *CheckRunOutput) error {
+			return errors.New("API error")
+		},
+	}
+
+	log := &recordingLogger{}
+	cfg := &Config{
+		RepoRoot:   dir,
+		Runner:     runner,
+		Owner:      "org",
+		Repo:       "repo",
+		CheckRun:   cr,
+		CheckRunID: 1,
+		Log:        log,
+	}
+
+	report, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() should not fail when check run update fails, got %v", err)
+	}
+	if !report.AllPassed {
+		t.Error("AllPassed should be true")
+	}
+
+	hasWarning := false
+	for _, msg := range log.messages {
+		if strings.Contains(msg, "WARN") && strings.Contains(msg, "check run") {
+			hasWarning = true
+		}
+	}
+	if !hasWarning {
+		t.Error("Run() should warn when check run update fails")
+	}
+}
+
+func TestRun_NoCheckRunUpdate_WhenNotConfigured(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	modDir := filepath.Join(dir, "pkg")
+	mustMkdir(t, filepath.Join(modDir, "skills"))
+	mustWrite(t, filepath.Join(modDir, "tests.md"), "# Tests\n")
+	mustWrite(t, filepath.Join(modDir, "skills", "usage.md"), "# Usage\n")
+
+	runner := &mockRunner{
+		run: func(ctx context.Context, dir string, name string, args ...string) (string, error) {
+			return "PASS\n", nil
+		},
+	}
+
+	// No CheckRun or CheckRunID set — should not panic
+	cfg := &Config{
+		RepoRoot: dir,
+		Runner:   runner,
+		Owner:    "org",
+		Repo:     "repo",
+		Log:      &recordingLogger{},
+	}
+
+	report, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !report.AllPassed {
+		t.Error("AllPassed should be true")
+	}
+}
+
 // --- nopLogger tests ---
 
 func TestNopLogger_DoesNotPanic(t *testing.T) {

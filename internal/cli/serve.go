@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/nullne/star-fleet/internal/config"
+	"github.com/nullne/star-fleet/internal/gh"
 	"github.com/nullne/star-fleet/internal/ghapp"
 	"github.com/nullne/star-fleet/internal/orchestrator"
 	"github.com/nullne/star-fleet/internal/repocache"
@@ -111,8 +112,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 	workdir := serveWorkdir
 	cache := repocache.New(workdir, appClient.InstallationToken)
 
+	ghClient := &gh.APIReviewClient{
+		Token: appClient.InstallationToken,
+	}
+
 	runner := &pipelineRunner{
-		cache: cache,
+		cache:    cache,
+		ghClient: ghClient,
 	}
 
 	handler := webhook.NewHandler(serveLabel, serveBotUser, runner)
@@ -143,7 +149,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 // pipelineRunner implements webhook.Runner by cloning/fetching the repo and
 // running an Orchestrator against the local clone.
 type pipelineRunner struct {
-	cache *repocache.Cache
+	cache    *repocache.Cache
+	ghClient *gh.APIReviewClient
 }
 
 func (r *pipelineRunner) Run(owner, repo string, number int) error {
@@ -171,16 +178,30 @@ func (r *pipelineRunner) Run(owner, repo string, number int) error {
 	return o.Run(ctx)
 }
 
-func (r *pipelineRunner) Test(owner, repo string, prNumber int) error {
+func (r *pipelineRunner) Test(owner, repo, headSHA string, prNumber int) error {
 	ctx := context.Background()
+
+	// Create a Check Run in "in_progress" state if we have a SHA and a GH client.
+	var checkRunID int64
+	if headSHA != "" && r.ghClient != nil {
+		id, err := r.ghClient.CreateCheckRun(ctx, owner, repo, "Fleet Test", headSHA, "in_progress")
+		if err != nil {
+			log.Printf("serve: failed to create check run: %v", err)
+		} else {
+			checkRunID = id
+			log.Printf("serve: created check run %d for %s/%s@%s", id, owner, repo, headSHA)
+		}
+	}
 
 	repoRoot, err := r.cache.Ensure(ctx, owner, repo)
 	if err != nil {
+		r.failCheckRun(ctx, owner, repo, checkRunID, fmt.Sprintf("Failed to clone repo: %v", err))
 		return fmt.Errorf("ensuring repo clone: %w", err)
 	}
 
 	cfg, err := config.Load(repoRoot)
 	if err != nil {
+		r.failCheckRun(ctx, owner, repo, checkRunID, fmt.Sprintf("Failed to load config: %v", err))
 		return fmt.Errorf("loading config: %w", err)
 	}
 
@@ -194,8 +215,15 @@ func (r *pipelineRunner) Test(owner, repo string, prNumber int) error {
 		Log:         cliLogger{},
 	}
 
+	// Wire up the check run updater if we successfully created one.
+	if checkRunID != 0 && r.ghClient != nil {
+		testerCfg.CheckRun = &checkRunAdapter{client: r.ghClient}
+		testerCfg.CheckRunID = checkRunID
+	}
+
 	report, err := tester.Run(ctx, testerCfg)
 	if err != nil {
+		r.failCheckRun(ctx, owner, repo, checkRunID, fmt.Sprintf("Test run error: %v", err))
 		return fmt.Errorf("running tests: %w", err)
 	}
 
@@ -205,4 +233,36 @@ func (r *pipelineRunner) Test(owner, repo string, prNumber int) error {
 	}
 
 	return nil
+}
+
+// failCheckRun marks a check run as completed/failure when the pipeline errors
+// out before the tester can update it.
+func (r *pipelineRunner) failCheckRun(ctx context.Context, owner, repo string, checkRunID int64, msg string) {
+	if checkRunID == 0 || r.ghClient == nil {
+		return
+	}
+	output := &gh.CheckRunOutput{
+		Title:   "Fleet Test — Error",
+		Summary: msg,
+	}
+	if err := r.ghClient.UpdateCheckRun(ctx, owner, repo, checkRunID, "completed", "failure", output); err != nil {
+		log.Printf("serve: failed to update check run %d to failure: %v", checkRunID, err)
+	}
+}
+
+// checkRunAdapter adapts gh.APIReviewClient to the tester.CheckRunUpdater interface.
+type checkRunAdapter struct {
+	client *gh.APIReviewClient
+}
+
+func (a *checkRunAdapter) UpdateCheckRun(ctx context.Context, owner, repo string, checkRunID int64, status, conclusion string, output *tester.CheckRunOutput) error {
+	var ghOutput *gh.CheckRunOutput
+	if output != nil {
+		ghOutput = &gh.CheckRunOutput{
+			Title:   output.Title,
+			Summary: output.Summary,
+			Text:    output.Text,
+		}
+	}
+	return a.client.UpdateCheckRun(ctx, owner, repo, checkRunID, status, conclusion, ghOutput)
 }
