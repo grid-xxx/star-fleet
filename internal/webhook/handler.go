@@ -11,6 +11,7 @@ import (
 // Runner abstracts the fleet pipeline execution, allowing injection for testing.
 type Runner interface {
 	Run(owner, repo string, number int) error
+	Test(owner, repo string, prNumber int) error
 }
 
 // Handler routes GitHub webhook events to the fleet pipeline.
@@ -21,6 +22,7 @@ type Handler struct {
 
 	mu      sync.Mutex
 	running map[string]bool // per-repo busy tracking: "owner/repo" -> true
+	testing map[string]bool // per-repo busy tracking for test runs
 }
 
 // NewHandler creates an event handler.
@@ -33,6 +35,7 @@ func NewHandler(label, botUser string, runner Runner) *Handler {
 		botUser: botUser,
 		runner:  runner,
 		running: make(map[string]bool),
+		testing: make(map[string]bool),
 	}
 }
 
@@ -44,6 +47,8 @@ func (h *Handler) HandleEvent(eventType string, payload []byte) (string, error) 
 		return h.handleIssues(payload)
 	case "issue_comment":
 		return h.handleIssueComment(payload)
+	case "pull_request":
+		return h.handlePullRequest(payload)
 	default:
 		log.Printf("handler: ignoring event type %q", eventType)
 		return "ignored", nil
@@ -68,6 +73,19 @@ type issueCommentPayload struct {
 		User payloadUser `json:"user"`
 	} `json:"comment"`
 	Repo payloadRepo `json:"repository"`
+}
+
+type pullRequestPayload struct {
+	Action      string      `json:"action"`
+	Number      int         `json:"number"`
+	PullRequest payloadPR   `json:"pull_request"`
+	Sender      payloadUser `json:"sender"`
+	Repo        payloadRepo `json:"repository"`
+}
+
+type payloadPR struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
 }
 
 type payloadLabel struct {
@@ -141,6 +159,64 @@ func (h *Handler) handleIssueComment(payload []byte) (string, error) {
 
 	log.Printf("handler: /fleet run comment on issue #%d — triggering run", p.Issue.Number)
 	return h.tryRun(p.Repo.Owner.Login, p.Repo.Name, p.Issue.Number)
+}
+
+func (h *Handler) handlePullRequest(payload []byte) (string, error) {
+	var p pullRequestPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return "", fmt.Errorf("parsing pull_request payload: %w", err)
+	}
+
+	if p.Action != "opened" && p.Action != "synchronize" {
+		log.Printf("handler: pull_request action=%q, ignoring (want opened/synchronize)", p.Action)
+		return "ignored", nil
+	}
+
+	if h.isBot(p.Sender) {
+		log.Printf("handler: ignoring pull_request from bot user %q", p.Sender.Login)
+		return "skipped", nil
+	}
+
+	prNumber := p.Number
+	if prNumber == 0 {
+		prNumber = p.PullRequest.Number
+	}
+
+	log.Printf("handler: pull_request #%d action=%q — triggering test", prNumber, p.Action)
+	return h.tryTest(p.Repo.Owner.Login, p.Repo.Name, prNumber)
+}
+
+func (h *Handler) tryTest(owner, repo string, prNumber int) (string, error) {
+	key := repoKey(owner, repo)
+
+	h.mu.Lock()
+	if h.testing[key] {
+		h.mu.Unlock()
+		log.Printf("handler: %s test already running, rejecting PR #%d", key, prNumber)
+		return "busy", nil
+	}
+	h.testing[key] = true
+	h.mu.Unlock()
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("handler: panic in fleet test for %s#%d: %v", key, prNumber, r)
+			}
+			h.mu.Lock()
+			delete(h.testing, key)
+			h.mu.Unlock()
+		}()
+
+		log.Printf("handler: starting fleet test for %s#%d", key, prNumber)
+		if err := h.runner.Test(owner, repo, prNumber); err != nil {
+			log.Printf("handler: fleet test failed for %s#%d: %v", key, prNumber, err)
+			return
+		}
+		log.Printf("handler: fleet test completed for %s#%d", key, prNumber)
+	}()
+
+	return "triggered", nil
 }
 
 func (h *Handler) isBot(user payloadUser) bool {

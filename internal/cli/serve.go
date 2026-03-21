@@ -17,6 +17,7 @@ import (
 	"github.com/nullne/star-fleet/internal/ghapp"
 	"github.com/nullne/star-fleet/internal/orchestrator"
 	"github.com/nullne/star-fleet/internal/repocache"
+	"github.com/nullne/star-fleet/internal/tester"
 	"github.com/nullne/star-fleet/internal/ui"
 	"github.com/nullne/star-fleet/internal/webhook"
 )
@@ -168,4 +169,40 @@ func (r *pipelineRunner) Run(owner, repo string, number int) error {
 		RepoRoot: repoRoot,
 	}
 	return o.Run(ctx)
+}
+
+func (r *pipelineRunner) Test(owner, repo string, prNumber int) error {
+	ctx := context.Background()
+
+	repoRoot, err := r.cache.Ensure(ctx, owner, repo)
+	if err != nil {
+		return fmt.Errorf("ensuring repo clone: %w", err)
+	}
+
+	cfg, err := config.Load(repoRoot)
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	testerCfg := &tester.Config{
+		RepoRoot:    repoRoot,
+		TestCommand: cfg.Test.Command,
+		Owner:       owner,
+		Repo:        repo,
+		PRNumber:    prNumber,
+		GH:          ghCommenter{},
+		Log:         cliLogger{},
+	}
+
+	report, err := tester.Run(ctx, testerCfg)
+	if err != nil {
+		return fmt.Errorf("running tests: %w", err)
+	}
+
+	if !report.AllPassed {
+		return fmt.Errorf("test failures: %d/%d modules failed",
+			report.FailedModules+report.ErrorModules, report.TotalModules)
+	}
+
+	return nil
 }
