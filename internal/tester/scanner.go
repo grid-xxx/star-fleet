@@ -39,7 +39,7 @@ func ScanModules(repoRoot string) ([]Module, error) {
 
 		// Skip hidden directories and common noise
 		name := info.Name()
-		if info.IsDir() && (strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" || name == "worktrees") {
+		if info.IsDir() && path != repoRoot && (strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" || name == "worktrees") {
 			return filepath.SkipDir
 		}
 
