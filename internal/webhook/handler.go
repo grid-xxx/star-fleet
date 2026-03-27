@@ -14,15 +14,22 @@ type Runner interface {
 	Test(owner, repo, headSHA string, prNumber int) error
 }
 
+// IssueLinter abstracts the issue linting process, allowing injection for testing.
+type IssueLinter interface {
+	LintIssue(owner, repo string, issueNumber int) error
+}
+
 // Handler routes GitHub webhook events to the fleet pipeline.
 type Handler struct {
 	label   string
 	botUser string
 	runner  Runner
+	linter  IssueLinter
 
 	mu      sync.Mutex
 	running map[string]bool // per-repo busy tracking: "owner/repo" -> true
 	testing map[string]bool // per-repo busy tracking for test runs
+	linting map[string]bool // per-repo busy tracking for issue lint
 }
 
 // NewHandler creates an event handler.
@@ -36,7 +43,13 @@ func NewHandler(label, botUser string, runner Runner) *Handler {
 		runner:  runner,
 		running: make(map[string]bool),
 		testing: make(map[string]bool),
+		linting: make(map[string]bool),
 	}
+}
+
+// SetLinter configures an optional issue linter for opened/edited events.
+func (h *Handler) SetLinter(linter IssueLinter) {
+	h.linter = linter
 }
 
 // HandleEvent parses a webhook payload and dispatches it. It returns a short
@@ -121,23 +134,39 @@ func (h *Handler) handleIssues(payload []byte) (string, error) {
 		return "", fmt.Errorf("parsing issues payload: %w", err)
 	}
 
-	if p.Action != "labeled" {
-		log.Printf("handler: issues event action=%q, ignoring (want labeled)", p.Action)
+	switch p.Action {
+	case "labeled":
+		if !strings.EqualFold(p.Label.Name, h.label) {
+			log.Printf("handler: label %q does not match %q, skipping", p.Label.Name, h.label)
+			return "skipped", nil
+		}
+
+		if h.isBot(p.Sender) {
+			log.Printf("handler: ignoring event from bot user %q", p.Sender.Login)
+			return "skipped", nil
+		}
+
+		log.Printf("handler: issue #%d labeled with %q — triggering run", p.Issue.Number, h.label)
+		return h.tryRun(p.Repo.Owner.Login, p.Repo.Name, p.Issue.Number)
+
+	case "opened", "edited":
+		if h.isBot(p.Sender) {
+			log.Printf("handler: ignoring %s event from bot user %q", p.Action, p.Sender.Login)
+			return "skipped", nil
+		}
+
+		if h.linter == nil {
+			log.Printf("handler: issues event action=%q, no linter configured, ignoring", p.Action)
+			return "ignored", nil
+		}
+
+		log.Printf("handler: issue #%d %s — triggering lint", p.Issue.Number, p.Action)
+		return h.tryLint(p.Repo.Owner.Login, p.Repo.Name, p.Issue.Number)
+
+	default:
+		log.Printf("handler: issues event action=%q, ignoring", p.Action)
 		return "ignored", nil
 	}
-
-	if !strings.EqualFold(p.Label.Name, h.label) {
-		log.Printf("handler: label %q does not match %q, skipping", p.Label.Name, h.label)
-		return "skipped", nil
-	}
-
-	if h.isBot(p.Sender) {
-		log.Printf("handler: ignoring event from bot user %q", p.Sender.Login)
-		return "skipped", nil
-	}
-
-	log.Printf("handler: issue #%d labeled with %q — triggering run", p.Issue.Number, h.label)
-	return h.tryRun(p.Repo.Owner.Login, p.Repo.Name, p.Issue.Number)
 }
 
 func (h *Handler) handleIssueComment(payload []byte) (string, error) {
@@ -221,6 +250,39 @@ func (h *Handler) tryTest(owner, repo, headSHA string, prNumber int) (string, er
 			return
 		}
 		log.Printf("handler: fleet test completed for %s#%d", key, prNumber)
+	}()
+
+	return "triggered", nil
+}
+
+func (h *Handler) tryLint(owner, repo string, number int) (string, error) {
+	key := repoKey(owner, repo)
+
+	h.mu.Lock()
+	if h.linting[key] {
+		h.mu.Unlock()
+		log.Printf("handler: %s lint already running, rejecting issue #%d", key, number)
+		return "busy", nil
+	}
+	h.linting[key] = true
+	h.mu.Unlock()
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("handler: panic in issue lint for %s#%d: %v", key, number, r)
+			}
+			h.mu.Lock()
+			delete(h.linting, key)
+			h.mu.Unlock()
+		}()
+
+		log.Printf("handler: starting issue lint for %s#%d", key, number)
+		if err := h.linter.LintIssue(owner, repo, number); err != nil {
+			log.Printf("handler: issue lint failed for %s#%d: %v", key, number, err)
+			return
+		}
+		log.Printf("handler: issue lint completed for %s#%d", key, number)
 	}()
 
 	return "triggered", nil

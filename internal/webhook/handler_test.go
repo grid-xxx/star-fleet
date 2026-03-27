@@ -69,6 +69,65 @@ func (r *stubRunner) Test(owner, repo, headSHA string, prNumber int) error {
 	return r.testErr
 }
 
+// --- stub linter ---
+
+type lintCall struct {
+	Owner  string
+	Repo   string
+	Number int
+}
+
+type stubLinter struct {
+	mu      sync.Mutex
+	calls   []lintCall
+	blockCh chan struct{}
+	doneCh  chan struct{}
+	err     error
+}
+
+func newStubLinter() *stubLinter {
+	return &stubLinter{
+		doneCh: make(chan struct{}, 10),
+	}
+}
+
+func newBlockingStubLinter() *stubLinter {
+	return &stubLinter{
+		blockCh: make(chan struct{}),
+		doneCh:  make(chan struct{}, 10),
+	}
+}
+
+func (l *stubLinter) LintIssue(owner, repo string, issueNumber int) error {
+	if l.blockCh != nil {
+		<-l.blockCh
+	}
+	l.mu.Lock()
+	l.calls = append(l.calls, lintCall{owner, repo, issueNumber})
+	l.mu.Unlock()
+	if l.doneCh != nil {
+		l.doneCh <- struct{}{}
+	}
+	return l.err
+}
+
+func (l *stubLinter) getCalls() []lintCall {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]lintCall, len(l.calls))
+	copy(out, l.calls)
+	return out
+}
+
+func (l *stubLinter) waitDone(t *testing.T) {
+	t.Helper()
+	select {
+	case <-l.doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for lint to complete")
+	}
+}
+
 func (r *stubRunner) getCalls() []runCall {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -160,7 +219,7 @@ func TestHandleIssues_WrongAction(t *testing.T) {
 	runner := newStubRunner()
 	h := NewHandler("fleet", "", runner)
 
-	p := issuesPayload{Action: "opened"}
+	p := issuesPayload{Action: "closed"}
 	body, _ := json.Marshal(p)
 
 	status, err := h.HandleEvent("issues", body)
@@ -170,6 +229,172 @@ func TestHandleIssues_WrongAction(t *testing.T) {
 	if status != "ignored" {
 		t.Errorf("status = %q, want %q", status, "ignored")
 	}
+}
+
+func TestHandleIssues_OpenedNoLinter(t *testing.T) {
+	t.Parallel()
+
+	runner := newStubRunner()
+	h := NewHandler("fleet", "", runner)
+
+	p := issuesPayload{
+		Action: "opened",
+		Issue:  payloadIssue{Number: 5, Title: "test"},
+		Sender: payloadUser{Login: "alice", Type: "User"},
+		Repo:   payloadRepo{Name: "r"},
+	}
+	p.Repo.Owner.Login = "o"
+	body, _ := json.Marshal(p)
+
+	status, err := h.HandleEvent("issues", body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status != "ignored" {
+		t.Errorf("status = %q, want %q (no linter configured)", status, "ignored")
+	}
+}
+
+func TestHandleIssues_OpenedWithLinter(t *testing.T) {
+	t.Parallel()
+
+	runner := newStubRunner()
+	linter := newStubLinter()
+	h := NewHandler("fleet", "", runner)
+	h.SetLinter(linter)
+
+	p := issuesPayload{
+		Action: "opened",
+		Issue:  payloadIssue{Number: 12, Title: "feat: new feature"},
+		Sender: payloadUser{Login: "alice", Type: "User"},
+		Repo:   payloadRepo{Name: "star-fleet"},
+	}
+	p.Repo.Owner.Login = "nullne"
+	body, _ := json.Marshal(p)
+
+	status, err := h.HandleEvent("issues", body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status != "triggered" {
+		t.Errorf("status = %q, want %q", status, "triggered")
+	}
+
+	linter.waitDone(t)
+	calls := linter.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("got %d lint calls, want 1", len(calls))
+	}
+	if calls[0].Owner != "nullne" || calls[0].Repo != "star-fleet" || calls[0].Number != 12 {
+		t.Errorf("call = %+v, want {nullne star-fleet 12}", calls[0])
+	}
+}
+
+func TestHandleIssues_EditedWithLinter(t *testing.T) {
+	t.Parallel()
+
+	runner := newStubRunner()
+	linter := newStubLinter()
+	h := NewHandler("fleet", "", runner)
+	h.SetLinter(linter)
+
+	p := issuesPayload{
+		Action: "edited",
+		Issue:  payloadIssue{Number: 8, Title: "fix: something"},
+		Sender: payloadUser{Login: "bob", Type: "User"},
+		Repo:   payloadRepo{Name: "repo"},
+	}
+	p.Repo.Owner.Login = "org"
+	body, _ := json.Marshal(p)
+
+	status, err := h.HandleEvent("issues", body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status != "triggered" {
+		t.Errorf("status = %q, want %q", status, "triggered")
+	}
+
+	linter.waitDone(t)
+	calls := linter.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("got %d lint calls, want 1", len(calls))
+	}
+	if calls[0].Number != 8 {
+		t.Errorf("number = %d, want 8", calls[0].Number)
+	}
+}
+
+func TestHandleIssues_OpenedBotSkipped(t *testing.T) {
+	t.Parallel()
+
+	runner := newStubRunner()
+	linter := newStubLinter()
+	h := NewHandler("fleet", "my-bot[bot]", runner)
+	h.SetLinter(linter)
+
+	p := issuesPayload{
+		Action: "opened",
+		Issue:  payloadIssue{Number: 3},
+		Sender: payloadUser{Login: "my-bot[bot]", Type: "Bot"},
+	}
+	body, _ := json.Marshal(p)
+
+	status, err := h.HandleEvent("issues", body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status != "skipped" {
+		t.Errorf("status = %q, want %q", status, "skipped")
+	}
+}
+
+func TestTryLint_RejectWhenBusy(t *testing.T) {
+	t.Parallel()
+
+	runner := newStubRunner()
+	linter := newBlockingStubLinter()
+	h := NewHandler("fleet", "", runner)
+	h.SetLinter(linter)
+
+	p1 := issuesPayload{
+		Action: "opened",
+		Issue:  payloadIssue{Number: 1},
+		Sender: payloadUser{Login: "alice", Type: "User"},
+		Repo:   payloadRepo{Name: "r"},
+	}
+	p1.Repo.Owner.Login = "o"
+	body1, _ := json.Marshal(p1)
+
+	status1, err := h.HandleEvent("issues", body1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status1 != "triggered" {
+		t.Errorf("first status = %q, want %q", status1, "triggered")
+	}
+
+	time.Sleep(20 * time.Millisecond)
+
+	p2 := issuesPayload{
+		Action: "opened",
+		Issue:  payloadIssue{Number: 2},
+		Sender: payloadUser{Login: "bob", Type: "User"},
+		Repo:   payloadRepo{Name: "r"},
+	}
+	p2.Repo.Owner.Login = "o"
+	body2, _ := json.Marshal(p2)
+
+	status2, err := h.HandleEvent("issues", body2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status2 != "busy" {
+		t.Errorf("second status = %q, want %q", status2, "busy")
+	}
+
+	close(linter.blockCh)
+	linter.waitDone(t)
 }
 
 func TestHandleIssues_BotSender(t *testing.T) {

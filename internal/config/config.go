@@ -12,12 +12,13 @@ import (
 )
 
 type Config struct {
-	Agent    AgentConfig    `toml:"agent"`
-	Review   ReviewConfig   `toml:"review"`
-	Watch    WatchConfig    `toml:"watch"`
-	CI       CIConfig       `toml:"ci"`
-	Test     TestConfig     `toml:"test"`
-	Telegram TelegramConfig `toml:"telegram"`
+	Agent     AgentConfig     `toml:"agent"`
+	Review    ReviewConfig    `toml:"review"`
+	Watch     WatchConfig     `toml:"watch"`
+	CI        CIConfig        `toml:"ci"`
+	Test      TestConfig      `toml:"test"`
+	Telegram  TelegramConfig  `toml:"telegram"`
+	IssueLint IssueLintConfig `toml:"issue_lint"`
 }
 
 type AgentConfig struct {
@@ -58,6 +59,13 @@ type ReviewConfig struct {
 type TelegramConfig struct {
 	BotToken string `toml:"bot_token"`
 	ChatID   string `toml:"chat_id"`
+}
+
+type IssueLintConfig struct {
+	Enabled       bool   `toml:"enabled"`
+	GuidelineFile string `toml:"guideline_file"`
+	APIKey        string `toml:"api_key"`
+	Model         string `toml:"model"`
 }
 
 // Duration wraps time.Duration to support TOML string parsing (e.g. "30s", "2h").
@@ -129,6 +137,10 @@ func Load(repoRoot string) (*Config, error) {
 		cfg.Review.AppKeyFile = v
 	}
 
+	if v := os.Getenv("FLEET_ISSUE_LINT_API_KEY"); v != "" {
+		cfg.IssueLint.APIKey = v
+	}
+
 	switch cfg.Agent.Backend {
 	case "claude-code", "cursor", "mock":
 	default:
@@ -145,6 +157,13 @@ func Load(repoRoot string) (*Config, error) {
 
 	if cfg.Review.MaxRounds < 1 {
 		cfg.Review.MaxRounds = 3
+	}
+
+	if cfg.IssueLint.Model == "" {
+		cfg.IssueLint.Model = "claude-sonnet-4-20250514"
+	}
+	if cfg.IssueLint.GuidelineFile == "" {
+		cfg.IssueLint.GuidelineFile = "docs/ISSUE-SPEC.md"
 	}
 
 	return &cfg, nil
