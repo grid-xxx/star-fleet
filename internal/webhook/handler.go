@@ -28,13 +28,14 @@ type Handler struct {
 	botUser     string
 	runner      Runner
 	linter      IssueLinter
-	dedupWindow time.Duration // dedup window for edited events (default 5m)
+	dedupWindow time.Duration // default dedup window for edited events (5m)
 
-	mu        sync.Mutex
-	running   map[string]bool      // per-repo busy tracking: "owner/repo" -> true
-	testing   map[string]bool      // per-repo busy tracking for test runs
-	linting   map[string]bool      // per-repo busy tracking for issue lint
-	lintDedup map[string]time.Time // "owner/repo#number" -> last lint time
+	mu              sync.Mutex
+	running         map[string]bool          // per-repo busy tracking: "owner/repo" -> true
+	testing         map[string]bool          // per-repo busy tracking for test runs
+	linting         map[string]bool          // per-repo busy tracking for issue lint
+	lintDedup       map[string]time.Time     // "owner/repo#number" -> last lint time
+	repoDedupWindow map[string]time.Duration // "owner/repo" -> per-repo dedup window
 }
 
 // NewHandler creates an event handler.
@@ -43,14 +44,15 @@ type Handler struct {
 //   - runner: executes the fleet pipeline
 func NewHandler(label, botUser string, runner Runner) *Handler {
 	return &Handler{
-		label:       label,
-		botUser:     botUser,
-		runner:      runner,
-		dedupWindow: 5 * time.Minute,
-		running:     make(map[string]bool),
-		testing:     make(map[string]bool),
-		linting:     make(map[string]bool),
-		lintDedup:   make(map[string]time.Time),
+		label:           label,
+		botUser:         botUser,
+		runner:          runner,
+		dedupWindow:     5 * time.Minute,
+		running:         make(map[string]bool),
+		testing:         make(map[string]bool),
+		linting:         make(map[string]bool),
+		lintDedup:       make(map[string]time.Time),
+		repoDedupWindow: make(map[string]time.Duration),
 	}
 }
 
@@ -272,7 +274,11 @@ func (h *Handler) tryLint(owner, repo string, number int) (string, error) {
 	dedupKey := fmt.Sprintf("%s#%d", key, number)
 
 	h.mu.Lock()
-	if last, ok := h.lintDedup[dedupKey]; ok && time.Since(last) < h.dedupWindow {
+	window := h.dedupWindow
+	if w, ok := h.repoDedupWindow[key]; ok {
+		window = w
+	}
+	if last, ok := h.lintDedup[dedupKey]; ok && time.Since(last) < window {
 		h.mu.Unlock()
 		log.Printf("handler: %s issue #%d linted %v ago, dedup skipping", key, number, time.Since(last).Round(time.Second))
 		return "skipped", nil
@@ -306,10 +312,10 @@ func (h *Handler) tryLint(owner, repo string, number int) (string, error) {
 			h.mu.Unlock()
 			return
 		}
-		// Update dedup window from per-repo config if provided
+		// Update per-repo dedup window from config if provided
 		if cfgWindow > 0 {
 			h.mu.Lock()
-			h.dedupWindow = cfgWindow
+			h.repoDedupWindow[key] = cfgWindow
 			h.mu.Unlock()
 		}
 		log.Printf("handler: issue lint completed for %s#%d", key, number)
