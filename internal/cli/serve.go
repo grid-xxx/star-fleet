@@ -17,6 +17,7 @@ import (
 	"github.com/nullne/star-fleet/internal/config"
 	"github.com/nullne/star-fleet/internal/gh"
 	"github.com/nullne/star-fleet/internal/ghapp"
+	"github.com/nullne/star-fleet/internal/issuelint"
 	"github.com/nullne/star-fleet/internal/orchestrator"
 	"github.com/nullne/star-fleet/internal/repocache"
 	"github.com/nullne/star-fleet/internal/tester"
@@ -123,6 +124,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	handler := webhook.NewHandler(serveLabel, serveBotUser, runner)
+
+	// Wire up the issue linter
+	linterRunner := &issueLintRunner{cache: cache}
+	handler.SetLinter(linterRunner)
+
 	srv := webhook.NewServer(servePort, cfg.secret, handler)
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
@@ -278,4 +284,68 @@ func (a *checkRunAdapter) UpdateCheckRun(ctx context.Context, owner, repo string
 		}
 	}
 	return a.client.UpdateCheckRun(ctx, owner, repo, checkRunID, status, conclusion, ghOutput)
+}
+
+// issueLintRunner implements webhook.IssueLinter.
+type issueLintRunner struct {
+	cache *repocache.Cache
+}
+
+func (r *issueLintRunner) LintIssue(owner, repo string, issueNumber int) (time.Duration, error) {
+	ctx := context.Background()
+
+	repoRoot, err := r.cache.Ensure(ctx, owner, repo)
+	if err != nil {
+		return 0, fmt.Errorf("ensuring repo clone: %w", err)
+	}
+
+	cfg, err := config.Load(repoRoot)
+	if err != nil {
+		return 0, fmt.Errorf("loading config: %w", err)
+	}
+
+	if !cfg.IssueLint.Enabled {
+		log.Printf("serve: issue lint disabled for %s/%s, skipping", owner, repo)
+		return 0, nil
+	}
+
+	dedupWindow := cfg.IssueLint.DedupWindow.Duration
+
+	adapter := &lintGHAdapter{}
+	linter := &issuelint.Linter{GH: adapter}
+
+	result, err := linter.Lint(ctx, owner, repo, issueNumber, &cfg.IssueLint)
+	if err != nil {
+		return 0, fmt.Errorf("linting issue: %w", err)
+	}
+
+	if !result.Pass && result.Comment != "" {
+		if err := gh.PostComment(ctx, owner, repo, issueNumber, result.Comment); err != nil {
+			return dedupWindow, fmt.Errorf("posting lint comment: %w", err)
+		}
+		log.Printf("serve: posted lint feedback on %s/%s#%d", owner, repo, issueNumber)
+	} else {
+		log.Printf("serve: issue %s/%s#%d passed lint check", owner, repo, issueNumber)
+	}
+
+	return dedupWindow, nil
+}
+
+// lintGHAdapter adapts the gh package functions to the issuelint.GHClient interface.
+type lintGHAdapter struct{}
+
+func (a *lintGHAdapter) FetchIssue(ctx context.Context, owner, repo string, number int) (string, string, error) {
+	issue, err := gh.FetchIssue(ctx, owner, repo, number)
+	if err != nil {
+		return "", "", err
+	}
+	return issue.Title, issue.Body, nil
+}
+
+func (a *lintGHAdapter) FetchFileContent(ctx context.Context, owner, repo, path string) (string, error) {
+	return gh.FetchFileContent(ctx, owner, repo, path)
+}
+
+func (a *lintGHAdapter) PostComment(ctx context.Context, owner, repo string, number int, body string) error {
+	return gh.PostComment(ctx, owner, repo, number, body)
 }

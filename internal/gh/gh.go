@@ -3,6 +3,7 @@ package gh
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/nullne/star-fleet/internal/retry"
 )
+
+var base64StdDecode = base64.StdEncoding.DecodeString
 
 type Issue struct {
 	Number int    `json:"number"`
@@ -278,6 +281,36 @@ func SubmitReview(ctx context.Context, owner, repo string, prNumber int, event, 
 // a request-changes review because the reviewer is the PR author.
 func isOwnPRError(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "can not request changes on your own pull request")
+}
+
+// FetchFileContent reads a file from a repository using the GitHub API.
+func FetchFileContent(ctx context.Context, owner, repo, path string) (string, error) {
+	nwo := owner + "/" + repo
+	out, err := runFn(ctx, "", "api",
+		fmt.Sprintf("repos/%s/contents/%s", nwo, path),
+		"--jq", ".content")
+	if err != nil {
+		return "", fmt.Errorf("fetching file %s: %w", path, err)
+	}
+	// GitHub returns base64-encoded content; gh --jq decodes the JSON
+	// but the content field itself is base64. Decode it.
+	content := strings.TrimSpace(out)
+	decoded, err := base64Decode(content)
+	if err != nil {
+		// If base64 decode fails, return raw (might already be decoded)
+		return content, nil
+	}
+	return decoded, nil
+}
+
+func base64Decode(s string) (string, error) {
+	// GitHub returns base64 with newlines
+	s = strings.ReplaceAll(s, "\n", "")
+	b, err := base64StdDecode(s)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 func DefaultBranch(ctx context.Context, owner, repo string) (string, error) {

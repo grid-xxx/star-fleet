@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Runner abstracts the fleet pipeline execution, allowing injection for testing.
@@ -14,15 +15,27 @@ type Runner interface {
 	Test(owner, repo, headSHA string, prNumber int) error
 }
 
+// IssueLinter abstracts the issue linting process, allowing injection for testing.
+type IssueLinter interface {
+	// LintIssue runs the lint check. Returns the configured dedup window
+	// (zero means use handler default) and any error.
+	LintIssue(owner, repo string, issueNumber int) (dedupWindow time.Duration, err error)
+}
+
 // Handler routes GitHub webhook events to the fleet pipeline.
 type Handler struct {
-	label   string
-	botUser string
-	runner  Runner
+	label       string
+	botUser     string
+	runner      Runner
+	linter      IssueLinter
+	dedupWindow time.Duration // default dedup window for edited events (5m)
 
-	mu      sync.Mutex
-	running map[string]bool // per-repo busy tracking: "owner/repo" -> true
-	testing map[string]bool // per-repo busy tracking for test runs
+	mu              sync.Mutex
+	running         map[string]bool          // per-repo busy tracking: "owner/repo" -> true
+	testing         map[string]bool          // per-repo busy tracking for test runs
+	linting         map[string]bool          // per-repo busy tracking for issue lint
+	lintDedup       map[string]time.Time     // "owner/repo#number" -> last lint time
+	repoDedupWindow map[string]time.Duration // "owner/repo" -> per-repo dedup window
 }
 
 // NewHandler creates an event handler.
@@ -31,12 +44,26 @@ type Handler struct {
 //   - runner: executes the fleet pipeline
 func NewHandler(label, botUser string, runner Runner) *Handler {
 	return &Handler{
-		label:   label,
-		botUser: botUser,
-		runner:  runner,
-		running: make(map[string]bool),
-		testing: make(map[string]bool),
+		label:           label,
+		botUser:         botUser,
+		runner:          runner,
+		dedupWindow:     5 * time.Minute,
+		running:         make(map[string]bool),
+		testing:         make(map[string]bool),
+		linting:         make(map[string]bool),
+		lintDedup:       make(map[string]time.Time),
+		repoDedupWindow: make(map[string]time.Duration),
 	}
+}
+
+// SetLinter configures an optional issue linter for opened/edited events.
+func (h *Handler) SetLinter(linter IssueLinter) {
+	h.linter = linter
+}
+
+// SetDedupWindow configures the dedup window for issue lint events.
+func (h *Handler) SetDedupWindow(d time.Duration) {
+	h.dedupWindow = d
 }
 
 // HandleEvent parses a webhook payload and dispatches it. It returns a short
@@ -121,23 +148,39 @@ func (h *Handler) handleIssues(payload []byte) (string, error) {
 		return "", fmt.Errorf("parsing issues payload: %w", err)
 	}
 
-	if p.Action != "labeled" {
-		log.Printf("handler: issues event action=%q, ignoring (want labeled)", p.Action)
+	switch p.Action {
+	case "labeled":
+		if !strings.EqualFold(p.Label.Name, h.label) {
+			log.Printf("handler: label %q does not match %q, skipping", p.Label.Name, h.label)
+			return "skipped", nil
+		}
+
+		if h.isBot(p.Sender) {
+			log.Printf("handler: ignoring event from bot user %q", p.Sender.Login)
+			return "skipped", nil
+		}
+
+		log.Printf("handler: issue #%d labeled with %q — triggering run", p.Issue.Number, h.label)
+		return h.tryRun(p.Repo.Owner.Login, p.Repo.Name, p.Issue.Number)
+
+	case "opened", "edited":
+		if h.isBot(p.Sender) {
+			log.Printf("handler: ignoring %s event from bot user %q", p.Action, p.Sender.Login)
+			return "skipped", nil
+		}
+
+		if h.linter == nil {
+			log.Printf("handler: issues event action=%q, no linter configured, ignoring", p.Action)
+			return "ignored", nil
+		}
+
+		log.Printf("handler: issue #%d %s — triggering lint", p.Issue.Number, p.Action)
+		return h.tryLint(p.Repo.Owner.Login, p.Repo.Name, p.Issue.Number)
+
+	default:
+		log.Printf("handler: issues event action=%q, ignoring", p.Action)
 		return "ignored", nil
 	}
-
-	if !strings.EqualFold(p.Label.Name, h.label) {
-		log.Printf("handler: label %q does not match %q, skipping", p.Label.Name, h.label)
-		return "skipped", nil
-	}
-
-	if h.isBot(p.Sender) {
-		log.Printf("handler: ignoring event from bot user %q", p.Sender.Login)
-		return "skipped", nil
-	}
-
-	log.Printf("handler: issue #%d labeled with %q — triggering run", p.Issue.Number, h.label)
-	return h.tryRun(p.Repo.Owner.Login, p.Repo.Name, p.Issue.Number)
 }
 
 func (h *Handler) handleIssueComment(payload []byte) (string, error) {
@@ -221,6 +264,61 @@ func (h *Handler) tryTest(owner, repo, headSHA string, prNumber int) (string, er
 			return
 		}
 		log.Printf("handler: fleet test completed for %s#%d", key, prNumber)
+	}()
+
+	return "triggered", nil
+}
+
+func (h *Handler) tryLint(owner, repo string, number int) (string, error) {
+	key := repoKey(owner, repo)
+	dedupKey := fmt.Sprintf("%s#%d", key, number)
+
+	h.mu.Lock()
+	window := h.dedupWindow
+	if w, ok := h.repoDedupWindow[key]; ok {
+		window = w
+	}
+	if last, ok := h.lintDedup[dedupKey]; ok && time.Since(last) < window {
+		h.mu.Unlock()
+		log.Printf("handler: %s issue #%d linted %v ago, dedup skipping", key, number, time.Since(last).Round(time.Second))
+		return "skipped", nil
+	}
+	if h.linting[key] {
+		h.mu.Unlock()
+		log.Printf("handler: %s lint already running, rejecting issue #%d", key, number)
+		return "busy", nil
+	}
+	h.linting[key] = true
+	h.lintDedup[dedupKey] = time.Now()
+	h.mu.Unlock()
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("handler: panic in issue lint for %s#%d: %v", key, number, r)
+			}
+			h.mu.Lock()
+			delete(h.linting, key)
+			h.mu.Unlock()
+		}()
+
+		log.Printf("handler: starting issue lint for %s#%d", key, number)
+		cfgWindow, err := h.linter.LintIssue(owner, repo, number)
+		if err != nil {
+			log.Printf("handler: issue lint failed for %s#%d: %v", key, number, err)
+			// Clear dedup on failure so the next event can retry
+			h.mu.Lock()
+			delete(h.lintDedup, dedupKey)
+			h.mu.Unlock()
+			return
+		}
+		// Update per-repo dedup window from config if provided
+		if cfgWindow > 0 {
+			h.mu.Lock()
+			h.repoDedupWindow[key] = cfgWindow
+			h.mu.Unlock()
+		}
+		log.Printf("handler: issue lint completed for %s#%d", key, number)
 	}()
 
 	return "triggered", nil
