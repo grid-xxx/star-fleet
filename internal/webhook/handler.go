@@ -17,7 +17,9 @@ type Runner interface {
 
 // IssueLinter abstracts the issue linting process, allowing injection for testing.
 type IssueLinter interface {
-	LintIssue(owner, repo string, issueNumber int) error
+	// LintIssue runs the lint check. Returns the configured dedup window
+	// (zero means use handler default) and any error.
+	LintIssue(owner, repo string, issueNumber int) (dedupWindow time.Duration, err error)
 }
 
 // Handler routes GitHub webhook events to the fleet pipeline.
@@ -295,9 +297,20 @@ func (h *Handler) tryLint(owner, repo string, number int) (string, error) {
 		}()
 
 		log.Printf("handler: starting issue lint for %s#%d", key, number)
-		if err := h.linter.LintIssue(owner, repo, number); err != nil {
+		cfgWindow, err := h.linter.LintIssue(owner, repo, number)
+		if err != nil {
 			log.Printf("handler: issue lint failed for %s#%d: %v", key, number, err)
+			// Clear dedup on failure so the next event can retry
+			h.mu.Lock()
+			delete(h.lintDedup, dedupKey)
+			h.mu.Unlock()
 			return
+		}
+		// Update dedup window from per-repo config if provided
+		if cfgWindow > 0 {
+			h.mu.Lock()
+			h.dedupWindow = cfgWindow
+			h.mu.Unlock()
 		}
 		log.Printf("handler: issue lint completed for %s#%d", key, number)
 	}()

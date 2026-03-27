@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -98,7 +99,7 @@ func newBlockingStubLinter() *stubLinter {
 	}
 }
 
-func (l *stubLinter) LintIssue(owner, repo string, issueNumber int) error {
+func (l *stubLinter) LintIssue(owner, repo string, issueNumber int) (time.Duration, error) {
 	if l.blockCh != nil {
 		<-l.blockCh
 	}
@@ -108,7 +109,7 @@ func (l *stubLinter) LintIssue(owner, repo string, issueNumber int) error {
 	if l.doneCh != nil {
 		l.doneCh <- struct{}{}
 	}
-	return l.err
+	return 0, l.err
 }
 
 func (l *stubLinter) getCalls() []lintCall {
@@ -388,6 +389,52 @@ func TestTryLint_DedupSkipsRecentLint(t *testing.T) {
 	if status2 != "skipped" {
 		t.Errorf("second status = %q, want %q (should be deduped)", status2, "skipped")
 	}
+}
+
+func TestTryLint_DedupClearedOnFailure(t *testing.T) {
+	t.Parallel()
+
+	runner := newStubRunner()
+	linter := newStubLinter()
+	linter.err = fmt.Errorf("API error")
+	h := NewHandler("fleet", "", runner)
+	h.SetLinter(linter)
+	h.SetDedupWindow(1 * time.Hour)
+
+	p := issuesPayload{
+		Action: "opened",
+		Issue:  payloadIssue{Number: 99, Title: "test"},
+		Sender: payloadUser{Login: "alice", Type: "User"},
+		Repo:   payloadRepo{Name: "r"},
+	}
+	p.Repo.Owner.Login = "o"
+	body, _ := json.Marshal(p)
+
+	// First event: triggers but fails
+	status1, err := h.HandleEvent("issues", body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status1 != "triggered" {
+		t.Errorf("first status = %q, want %q", status1, "triggered")
+	}
+
+	linter.waitDone(t)
+	time.Sleep(20 * time.Millisecond) // let dedup cleanup happen
+
+	// Second event: should trigger again (dedup cleared on failure)
+	linter.err = nil
+	p.Action = "edited"
+	body2, _ := json.Marshal(p)
+	status2, err := h.HandleEvent("issues", body2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status2 != "triggered" {
+		t.Errorf("second status = %q, want %q (dedup should be cleared after failure)", status2, "triggered")
+	}
+
+	linter.waitDone(t)
 }
 
 func TestTryLint_RejectWhenBusy(t *testing.T) {

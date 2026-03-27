@@ -291,42 +291,44 @@ type issueLintRunner struct {
 	cache *repocache.Cache
 }
 
-func (r *issueLintRunner) LintIssue(owner, repo string, issueNumber int) error {
+func (r *issueLintRunner) LintIssue(owner, repo string, issueNumber int) (time.Duration, error) {
 	ctx := context.Background()
 
 	repoRoot, err := r.cache.Ensure(ctx, owner, repo)
 	if err != nil {
-		return fmt.Errorf("ensuring repo clone: %w", err)
+		return 0, fmt.Errorf("ensuring repo clone: %w", err)
 	}
 
 	cfg, err := config.Load(repoRoot)
 	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
+		return 0, fmt.Errorf("loading config: %w", err)
 	}
 
 	if !cfg.IssueLint.Enabled {
 		log.Printf("serve: issue lint disabled for %s/%s, skipping", owner, repo)
-		return nil
+		return 0, nil
 	}
+
+	dedupWindow := cfg.IssueLint.DedupWindow.Duration
 
 	adapter := &lintGHAdapter{}
 	linter := &issuelint.Linter{GH: adapter}
 
 	result, err := linter.Lint(ctx, owner, repo, issueNumber, &cfg.IssueLint)
 	if err != nil {
-		return fmt.Errorf("linting issue: %w", err)
+		return 0, fmt.Errorf("linting issue: %w", err)
 	}
 
 	if !result.Pass && result.Comment != "" {
 		if err := gh.PostComment(ctx, owner, repo, issueNumber, result.Comment); err != nil {
-			return fmt.Errorf("posting lint comment: %w", err)
+			return dedupWindow, fmt.Errorf("posting lint comment: %w", err)
 		}
 		log.Printf("serve: posted lint feedback on %s/%s#%d", owner, repo, issueNumber)
 	} else {
 		log.Printf("serve: issue %s/%s#%d passed lint check", owner, repo, issueNumber)
 	}
 
-	return nil
+	return dedupWindow, nil
 }
 
 // lintGHAdapter adapts the gh package functions to the issuelint.GHClient interface.
