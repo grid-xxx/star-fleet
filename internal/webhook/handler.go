@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Runner abstracts the fleet pipeline execution, allowing injection for testing.
@@ -21,15 +22,17 @@ type IssueLinter interface {
 
 // Handler routes GitHub webhook events to the fleet pipeline.
 type Handler struct {
-	label   string
-	botUser string
-	runner  Runner
-	linter  IssueLinter
+	label       string
+	botUser     string
+	runner      Runner
+	linter      IssueLinter
+	dedupWindow time.Duration // dedup window for edited events (default 5m)
 
-	mu      sync.Mutex
-	running map[string]bool // per-repo busy tracking: "owner/repo" -> true
-	testing map[string]bool // per-repo busy tracking for test runs
-	linting map[string]bool // per-repo busy tracking for issue lint
+	mu        sync.Mutex
+	running   map[string]bool      // per-repo busy tracking: "owner/repo" -> true
+	testing   map[string]bool      // per-repo busy tracking for test runs
+	linting   map[string]bool      // per-repo busy tracking for issue lint
+	lintDedup map[string]time.Time // "owner/repo#number" -> last lint time
 }
 
 // NewHandler creates an event handler.
@@ -38,18 +41,25 @@ type Handler struct {
 //   - runner: executes the fleet pipeline
 func NewHandler(label, botUser string, runner Runner) *Handler {
 	return &Handler{
-		label:   label,
-		botUser: botUser,
-		runner:  runner,
-		running: make(map[string]bool),
-		testing: make(map[string]bool),
-		linting: make(map[string]bool),
+		label:       label,
+		botUser:     botUser,
+		runner:      runner,
+		dedupWindow: 5 * time.Minute,
+		running:     make(map[string]bool),
+		testing:     make(map[string]bool),
+		linting:     make(map[string]bool),
+		lintDedup:   make(map[string]time.Time),
 	}
 }
 
 // SetLinter configures an optional issue linter for opened/edited events.
 func (h *Handler) SetLinter(linter IssueLinter) {
 	h.linter = linter
+}
+
+// SetDedupWindow configures the dedup window for issue lint events.
+func (h *Handler) SetDedupWindow(d time.Duration) {
+	h.dedupWindow = d
 }
 
 // HandleEvent parses a webhook payload and dispatches it. It returns a short
@@ -257,14 +267,21 @@ func (h *Handler) tryTest(owner, repo, headSHA string, prNumber int) (string, er
 
 func (h *Handler) tryLint(owner, repo string, number int) (string, error) {
 	key := repoKey(owner, repo)
+	dedupKey := fmt.Sprintf("%s#%d", key, number)
 
 	h.mu.Lock()
+	if last, ok := h.lintDedup[dedupKey]; ok && time.Since(last) < h.dedupWindow {
+		h.mu.Unlock()
+		log.Printf("handler: %s issue #%d linted %v ago, dedup skipping", key, number, time.Since(last).Round(time.Second))
+		return "skipped", nil
+	}
 	if h.linting[key] {
 		h.mu.Unlock()
 		log.Printf("handler: %s lint already running, rejecting issue #%d", key, number)
 		return "busy", nil
 	}
 	h.linting[key] = true
+	h.lintDedup[dedupKey] = time.Now()
 	h.mu.Unlock()
 
 	go func() {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/nullne/star-fleet/internal/config"
 )
@@ -46,7 +47,15 @@ func (l *Linter) Lint(ctx context.Context, owner, repo string, issueNumber int, 
 
 	prompt := buildPrompt(guideline, issueTitle, issueBody)
 
-	response, err := l.callLLM(ctx, cfg.APIKey, cfg.Model, prompt)
+	// Apply timeout to the LLM call
+	timeout := cfg.Timeout.Duration
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	llmCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	response, err := l.callLLM(llmCtx, cfg.APIKey, cfg.Model, prompt)
 	if err != nil {
 		return nil, fmt.Errorf("calling LLM: %w", err)
 	}

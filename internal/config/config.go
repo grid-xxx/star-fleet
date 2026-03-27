@@ -62,10 +62,12 @@ type TelegramConfig struct {
 }
 
 type IssueLintConfig struct {
-	Enabled       bool   `toml:"enabled"`
-	GuidelineFile string `toml:"guideline_file"`
-	APIKey        string `toml:"api_key"`
-	Model         string `toml:"model"`
+	Enabled       bool     `toml:"enabled"`
+	GuidelineFile string   `toml:"guideline_file"`
+	APIKey        string   `toml:"api_key"`
+	Model         string   `toml:"model"`
+	Timeout       Duration `toml:"timeout"`
+	DedupWindow   Duration `toml:"dedup_window"`
 }
 
 // Duration wraps time.Duration to support TOML string parsing (e.g. "30s", "2h").
@@ -164,6 +166,15 @@ func Load(repoRoot string) (*Config, error) {
 	}
 	if cfg.IssueLint.GuidelineFile == "" {
 		cfg.IssueLint.GuidelineFile = "docs/ISSUE-SPEC.md"
+	}
+	if cfg.IssueLint.Enabled && cfg.IssueLint.APIKey == "" {
+		return nil, fmt.Errorf("issue_lint.enabled is true but no API key configured: set api_key in [issue_lint] or FLEET_ISSUE_LINT_API_KEY env var")
+	}
+	if cfg.IssueLint.Timeout.Duration == 0 {
+		cfg.IssueLint.Timeout = Duration{30 * time.Second}
+	}
+	if cfg.IssueLint.DedupWindow.Duration == 0 {
+		cfg.IssueLint.DedupWindow = Duration{5 * time.Minute}
 	}
 
 	return &cfg, nil

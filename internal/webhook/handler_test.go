@@ -349,6 +349,47 @@ func TestHandleIssues_OpenedBotSkipped(t *testing.T) {
 	}
 }
 
+func TestTryLint_DedupSkipsRecentLint(t *testing.T) {
+	t.Parallel()
+
+	runner := newStubRunner()
+	linter := newStubLinter()
+	h := NewHandler("fleet", "", runner)
+	h.SetLinter(linter)
+	h.SetDedupWindow(1 * time.Hour) // long window so second event is always deduped
+
+	p := issuesPayload{
+		Action: "opened",
+		Issue:  payloadIssue{Number: 42, Title: "test"},
+		Sender: payloadUser{Login: "alice", Type: "User"},
+		Repo:   payloadRepo{Name: "r"},
+	}
+	p.Repo.Owner.Login = "o"
+	body, _ := json.Marshal(p)
+
+	// First event: should trigger
+	status1, err := h.HandleEvent("issues", body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status1 != "triggered" {
+		t.Errorf("first status = %q, want %q", status1, "triggered")
+	}
+
+	linter.waitDone(t)
+
+	// Second event for same issue: should be deduped
+	p.Action = "edited"
+	body2, _ := json.Marshal(p)
+	status2, err := h.HandleEvent("issues", body2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status2 != "skipped" {
+		t.Errorf("second status = %q, want %q (should be deduped)", status2, "skipped")
+	}
+}
+
 func TestTryLint_RejectWhenBusy(t *testing.T) {
 	t.Parallel()
 

@@ -570,6 +570,126 @@ backend = "gpt-4"
 	}
 }
 
+func TestIssueLintDefaults(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.IssueLint.Enabled {
+		t.Error("issue_lint.enabled should default to false")
+	}
+	if cfg.IssueLint.GuidelineFile != "docs/ISSUE-SPEC.md" {
+		t.Errorf("issue_lint.guideline_file = %q, want default", cfg.IssueLint.GuidelineFile)
+	}
+	if cfg.IssueLint.Model != "claude-sonnet-4-20250514" {
+		t.Errorf("issue_lint.model = %q, want default", cfg.IssueLint.Model)
+	}
+	if cfg.IssueLint.Timeout.Duration != 30*time.Second {
+		t.Errorf("issue_lint.timeout = %v, want 30s", cfg.IssueLint.Timeout.Duration)
+	}
+	if cfg.IssueLint.DedupWindow.Duration != 5*time.Minute {
+		t.Errorf("issue_lint.dedup_window = %v, want 5m", cfg.IssueLint.DedupWindow.Duration)
+	}
+}
+
+func TestIssueLintEnabledWithoutKey(t *testing.T) {
+	dir := t.TempDir()
+	cfgDir := filepath.Join(dir, ".fleet")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	data := `[agent]
+backend = "claude-code"
+
+[issue_lint]
+enabled = true
+`
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(dir)
+	if err == nil {
+		t.Fatal("expected error when issue_lint enabled without API key")
+	}
+	if !strings.Contains(err.Error(), "issue_lint") {
+		t.Errorf("error = %v, want to mention issue_lint", err)
+	}
+}
+
+func TestIssueLintEnabledWithKey(t *testing.T) {
+	dir := t.TempDir()
+	cfgDir := filepath.Join(dir, ".fleet")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	data := `[agent]
+backend = "claude-code"
+
+[issue_lint]
+enabled = true
+api_key = "sk-test-key"
+guideline_file = "AGENTS.md"
+timeout = "60s"
+dedup_window = "10m"
+`
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.IssueLint.Enabled {
+		t.Error("issue_lint.enabled should be true")
+	}
+	if cfg.IssueLint.APIKey != "sk-test-key" {
+		t.Errorf("issue_lint.api_key = %q", cfg.IssueLint.APIKey)
+	}
+	if cfg.IssueLint.GuidelineFile != "AGENTS.md" {
+		t.Errorf("issue_lint.guideline_file = %q", cfg.IssueLint.GuidelineFile)
+	}
+	if cfg.IssueLint.Timeout.Duration != 60*time.Second {
+		t.Errorf("issue_lint.timeout = %v, want 60s", cfg.IssueLint.Timeout.Duration)
+	}
+	if cfg.IssueLint.DedupWindow.Duration != 10*time.Minute {
+		t.Errorf("issue_lint.dedup_window = %v, want 10m", cfg.IssueLint.DedupWindow.Duration)
+	}
+}
+
+func TestIssueLintEnvVarOverride(t *testing.T) {
+	dir := t.TempDir()
+	cfgDir := filepath.Join(dir, ".fleet")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	data := `[agent]
+backend = "claude-code"
+
+[issue_lint]
+enabled = true
+api_key = "file-key"
+`
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("FLEET_ISSUE_LINT_API_KEY", "env-key")
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.IssueLint.APIKey != "env-key" {
+		t.Errorf("issue_lint.api_key = %q, want env override %q", cfg.IssueLint.APIKey, "env-key")
+	}
+}
+
 func TestLoadFullConfig(t *testing.T) {
 	dir := t.TempDir()
 	cfgDir := filepath.Join(dir, ".fleet")
